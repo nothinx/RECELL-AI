@@ -29,3 +29,4 @@ paho-mqtt==2.0.0          # MQTT Client for pushing data to Cloud/InfluxDB
 # 6. Enterprise Data Logging & Utilities
 loguru==0.7.2             # Structured, rotating, JSON-friendly logging
 SQLAlchemy==2.0.27        # ORM for SQLite/TimescaleDB local database
+fpdf==1.7.2               # PDF generation for Battery Passports

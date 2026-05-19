@@ -5,11 +5,14 @@ import time
 import json
 import argparse
 import sys
+import os
+from passport_generator import BatteryPassport
 
 # Default Configuration
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
 MODEL_PATH = 'models/recell_yolo_v8n.engine'
+PASSPORT_DIR = 'data/passports'
 
 class RecellMaster:
     def __init__(self, simulate=False, mock_ai=False):
@@ -17,17 +20,18 @@ class RecellMaster:
         self.mock_ai = mock_ai
         self.running = True
         self.ser = None
+        self.passport_gen = BatteryPassport(output_dir=PASSPORT_DIR)
         
         self.grade_decision = None
         self.vision_score = 1.0
-        self.electrical_data = {"soh": 0, "ir": 0}
+        self.electrical_data = {"soh": 0, "volt": 0, "curr": 0}
+        self.latest_frame = None
 
         print("=== RECELL-AI Master Controller ===")
         print(f"Simulation Mode : {self.simulate}")
         print(f"Mock AI Mode    : {self.mock_ai}")
         print("===================================")
 
-        # 1. Initialize Vision
         if not self.mock_ai:
             try:
                 from ultralytics import YOLO
@@ -37,7 +41,6 @@ class RecellMaster:
                 print(f"[AI] Failed to load YOLO: {e}. Falling back to MOCK_AI.")
                 self.mock_ai = True
 
-        # 2. Initialize Communication
         if not self.simulate:
             try:
                 self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
@@ -47,10 +50,9 @@ class RecellMaster:
                 self.simulate = True
 
     def vision_thread(self):
-        """Asynchronous vision processing loop."""
         if self.mock_ai:
             while self.running:
-                time.sleep(1) # Mock vision delay
+                time.sleep(1) 
             return
 
         cap = cv2.VideoCapture(0)
@@ -58,6 +60,7 @@ class RecellMaster:
             ret, frame = cap.read()
             if not ret: continue
             
+            self.latest_frame = frame.copy()
             results = self.model(frame, verbose=False)
             self.process_ai_results(results)
         cap.release()
@@ -74,27 +77,35 @@ class RecellMaster:
         self.vision_score = max(0, score)
 
     def serial_listener(self):
-        """Asynchronous serial data receiver."""
         while self.running:
             if not self.simulate and self.ser and self.ser.in_waiting > 0:
                 line = self.ser.readline().decode('utf-8').strip()
                 try:
                     data = json.loads(line)
-                    print(f"\r[STM32] {data}\nCMD> ", end="")
-                    if "soh" in data:
-                        self.electrical_data["soh"] = data["soh"]
+                    # Uncomment below for verbose debug
+                    # print(f"\r[STM32] {data}\nCMD> ", end="")
+                    
+                    if data.get("status") == "MEASUREMENT_DONE":
+                        self.electrical_data["volt"] = data.get("volt", 0)
+                        self.electrical_data["curr"] = data.get("curr", 0)
+                        # Placeholder: Calculate SoH based on V drop
+                        self.electrical_data["soh"] = 85.0 if data.get("volt", 0) > 3.6 else 40.0
+                        self.wait_flag = False
+                        
+                    elif data.get("status") in ["AT_PROX_1", "AT_PROX_2", "EJECTED_A", "DROPPED_B"]:
+                        self.wait_flag = False
+                        
                 except:
-                    print(f"\r[STM32 Raw] {line}\nCMD> ", end="")
+                    pass
             time.sleep(0.01)
 
     def send_command(self, cmd, params=None):
-        """Send structured command to STM32."""
         packet = {"cmd": cmd}
         if params: packet.update(params)
         payload = json.dumps(packet) + '\n'
-        
         if self.simulate:
             print(f"\n[Simulate-TX] {payload.strip()}")
+            self.wait_flag = False # Auto-unblock for simulation
         else:
             if self.ser: self.ser.write(payload.encode())
 
@@ -104,31 +115,76 @@ class RecellMaster:
         elif self.vision_score > 0.8 and soh > 80: return "A"
         else: return "B"
 
+    def run_automated_cycle(self):
+        print("\n--- Starting Full Automated Cycle ---")
+        battery_id = f"BAT_{int(time.time())}"
+        img_path = f"data/{battery_id}.jpg"
+        
+        # Capture AI Vision state before moving
+        print("[1] Evaluating Vision...")
+        time.sleep(1) # Let AI stabilize
+        if self.latest_frame is not None:
+            cv2.imwrite(img_path, self.latest_frame)
+        elif self.simulate: # Create mock image if testing
+            with open(img_path, 'w') as f: f.write("mock")
+
+        # Step 1: Move to Sensor Station
+        print("[2] Moving to Sensor Station (PROX 1)...")
+        self.wait_flag = True
+        self.send_command("MOVE_TO_PROX_1")
+        while self.wait_flag: time.sleep(0.1)
+
+        # Step 2: Push sensor & Measure
+        print("[3] Pushing Sensor and Measuring...")
+        self.wait_flag = True
+        self.send_command("APPLY_SENSOR_AND_MEASURE")
+        while self.wait_flag: time.sleep(0.1)
+        
+        # Step 3: Decision
+        grade = self.calculate_final_grade()
+        print(f"[4] Grading Decision: {grade} (VS: {self.vision_score:.2f}, SOH: {self.electrical_data['soh']}%)")
+        
+        # Generate Passport PDF
+        pdf_path = self.passport_gen.generate_pdf(
+            battery_id=battery_id, grade=grade, vision_score=self.vision_score,
+            volt=self.electrical_data['volt'], curr=self.electrical_data['curr'],
+            soh=self.electrical_data['soh'], image_path=img_path
+        )
+        print(f"[5] Battery Passport Generated: {pdf_path}")
+
+        # Step 4: Routing
+        if grade == "A":
+            print("[6] Routing to Grade A Bin (PROX 2)...")
+            self.wait_flag = True
+            self.send_command("MOVE_TO_PROX_2")
+            while self.wait_flag: time.sleep(0.1)
+            
+            print("[7] Ejecting Grade A...")
+            self.wait_flag = True
+            self.send_command("EJECT_A")
+            while self.wait_flag: time.sleep(0.1)
+        else:
+            print("[6] Routing to Grade B / Reject Bin (END OF CONVEYOR)...")
+            self.wait_flag = True
+            self.send_command("MOVE_TO_END")
+            while self.wait_flag: time.sleep(0.1)
+            
+        print("--- Cycle Complete ---\nCMD> ", end="")
+
     def interactive_cli(self):
-        """CLI for testing actuators manually."""
         print("\n--- Hardware Test Menu ---")
-        print("1: Test Conveyor")
-        print("2: Stop Conveyor")
-        print("3: Test Stepper (Sort)")
-        print("4: Test Load (CC)")
-        print("5: Full Automated Cycle")
+        print("1: Full Automated Cycle")
         print("q: Quit")
         
+        # Ensure data folder exists
+        if not os.path.exists("data"): os.makedirs("data")
+
         while self.running:
             try:
                 choice = input("CMD> ").strip()
-                if choice == '1': self.send_command("TEST_CONVEYOR")
-                elif choice == '2': self.send_command("STOP_CONVEYOR")
-                elif choice == '3': self.send_command("TEST_STEPPER")
-                elif choice == '4': self.send_command("TEST_LOAD")
-                elif choice == '5':
-                    print("[Auto] Starting Cycle...")
-                    self.send_command("MOVE_CONVEYOR", {"dist": 50})
-                    time.sleep(2)
-                    self.send_command("START_SOH")
-                    time.sleep(2)
-                    grade = self.calculate_final_grade()
-                    self.send_command("SORT", {"grade": grade})
+                if choice == '1': 
+                    # Run in a separate thread so listener continues
+                    threading.Thread(target=self.run_automated_cycle).start()
                 elif choice.lower() == 'q':
                     self.running = False
             except EOFError:

@@ -3,15 +3,24 @@
  * Target: STM32F411
  */
 
-#include <ArduinoJson.h> // Membutuhkan library ArduinoJson dari Library Manager
+#include <ArduinoJson.h>
 
 // --- KONFIGURASI PIN (Sesuaikan nanti) ---
-const int PIN_CONVEYOR_PWM = PA1;
+const int PIN_CONVEYOR_PWM = PA1; // PWM Speed (Set sangat lambat)
 const int PIN_CONVEYOR_DIR = PA0;
 
-const int PIN_STEPPER_DIR  = PB10;
-const int PIN_STEPPER_STEP = PB11;
-const int PIN_STEPPER_EN   = PB12;
+const int PIN_PROX_1       = PB0; // Sensor Station
+const int PIN_PROX_2       = PB1; // Grade A Eject Station
+
+// Stepper 1: Pendorong Sensor Elektrik
+const int PIN_STP_SENS_DIR = PB10;
+const int PIN_STP_SENS_STP = PB11;
+const int PIN_STP_SENS_EN  = PB12;
+
+// Stepper 2: Pendorong Baterai Grade A (2500 pulse)
+const int PIN_STP_EJCT_DIR = PA8;
+const int PIN_STP_EJCT_STP = PA9;
+const int PIN_STP_EJCT_EN  = PA10;
 
 const int PIN_LOAD_PWM     = PA5;
 const int PIN_VOLT_SENSE   = PA6;
@@ -20,23 +29,27 @@ const int PIN_CURR_SENSE   = PA7;
 // --- STATE MACHINE ---
 enum SystemState {
   STATE_IDLE,
-  STATE_SOH_MEASURING,
-  STATE_SORTING
+  STATE_WAIT_PROX_1,
+  STATE_WAIT_PROX_2,
+  STATE_WAIT_END
 };
 
 SystemState currentState = STATE_IDLE;
+int conveyorSpeed = 60; // 0-255, kecepatan sangat lambat
 
 void setup() {
-  Serial.begin(115200); // Komunikasi dengan Jetson
+  Serial.begin(115200); 
   
-  // Inisialisasi Pin
   pinMode(PIN_CONVEYOR_DIR, OUTPUT);
   pinMode(PIN_CONVEYOR_PWM, OUTPUT);
   
-  pinMode(PIN_STEPPER_DIR, OUTPUT);
-  pinMode(PIN_STEPPER_STEP, OUTPUT);
-  pinMode(PIN_STEPPER_EN, OUTPUT);
-  digitalWrite(PIN_STEPPER_EN, HIGH); // Disable stepper awal
+  pinMode(PIN_PROX_1, INPUT_PULLUP);
+  pinMode(PIN_PROX_2, INPUT_PULLUP);
+  
+  pinMode(PIN_STP_SENS_DIR, OUTPUT); pinMode(PIN_STP_SENS_STP, OUTPUT); pinMode(PIN_STP_SENS_EN, OUTPUT);
+  pinMode(PIN_STP_EJCT_DIR, OUTPUT); pinMode(PIN_STP_EJCT_STP, OUTPUT); pinMode(PIN_STP_EJCT_EN, OUTPUT);
+  digitalWrite(PIN_STP_SENS_EN, HIGH); 
+  digitalWrite(PIN_STP_EJCT_EN, HIGH); 
   
   pinMode(PIN_LOAD_PWM, OUTPUT);
   pinMode(PIN_VOLT_SENSE, INPUT_ANALOG);
@@ -46,106 +59,97 @@ void setup() {
 }
 
 void loop() {
-  // Cek apakah ada pesan masuk dari Jetson
   if (Serial.available() > 0) {
     String incomingStr = Serial.readStringUntil('\n');
     processCommand(incomingStr);
   }
 
-  // Jika sedang mode SOH, jalankan fungsi non-blocking atau state machine
-  if (currentState == STATE_SOH_MEASURING) {
-    measureSOH();
+  // --- NON-BLOCKING SENSOR CHECKS ---
+  if (currentState == STATE_WAIT_PROX_1) {
+    if (digitalRead(PIN_PROX_1) == LOW) { // Asumsi LOW saat mendeteksi baterai
+      analogWrite(PIN_CONVEYOR_PWM, 0); // Stop konveyor
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "AT_PROX_1");
+    }
+  }
+  
+  if (currentState == STATE_WAIT_PROX_2) {
+    if (digitalRead(PIN_PROX_2) == LOW) {
+      analogWrite(PIN_CONVEYOR_PWM, 0);
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "AT_PROX_2");
+    }
   }
 }
 
 // --- FUNGSI LOGIKA ---
-
 void processCommand(String jsonStr) {
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, jsonStr);
-
-  if (error) {
-    return; // Abaikan pesan gagal parse
-  }
+  if (error) return;
 
   String cmd = doc["cmd"];
 
-  if (cmd == "TEST_CONVEYOR") {
+  if (cmd == "MOVE_TO_PROX_1") {
     digitalWrite(PIN_CONVEYOR_DIR, HIGH);
-    analogWrite(PIN_CONVEYOR_PWM, 100); // PWM 0-255
-    sendTelemetry(0, 0, "TESTING_CONVEYOR");
-  } 
-  else if (cmd == "STOP_CONVEYOR") {
+    analogWrite(PIN_CONVEYOR_PWM, conveyorSpeed);
+    currentState = STATE_WAIT_PROX_1;
+  }
+  else if (cmd == "APPLY_SENSOR_AND_MEASURE") {
+    // 1. Stepper dorong sensor ke baterai
+    moveStepper(PIN_STP_SENS_STP, PIN_STP_SENS_DIR, PIN_STP_SENS_EN, 1000, HIGH); 
+    
+    // 2. Lakukan pengukuran Constant Current
+    analogWrite(PIN_LOAD_PWM, 128); 
+    delay(2000); // Tahan beban 2 detik (disimulasikan blocking sebentar)
+    float volt = (analogRead(PIN_VOLT_SENSE) / 1023.0) * 3.3 * 2.0; 
+    float curr = (analogRead(PIN_CURR_SENSE) / 1023.0) * 3.3;
+    analogWrite(PIN_LOAD_PWM, 0);
+    
+    // 3. Stepper tarik sensor mundur
+    moveStepper(PIN_STP_SENS_STP, PIN_STP_SENS_DIR, PIN_STP_SENS_EN, 1000, LOW);
+    
+    sendTelemetry(volt, curr, "MEASUREMENT_DONE");
+  }
+  else if (cmd == "MOVE_TO_PROX_2") { // Untuk Grade A
+    digitalWrite(PIN_CONVEYOR_DIR, HIGH);
+    analogWrite(PIN_CONVEYOR_PWM, conveyorSpeed);
+    currentState = STATE_WAIT_PROX_2;
+  }
+  else if (cmd == "EJECT_A") {
+    // Stepper dorong baterai Grade A (2500 pulse)
+    moveStepper(PIN_STP_EJCT_STP, PIN_STP_EJCT_DIR, PIN_STP_EJCT_EN, 2500, HIGH);
+    // Kembalikan posisi hopper
+    moveStepper(PIN_STP_EJCT_STP, PIN_STP_EJCT_DIR, PIN_STP_EJCT_EN, 2500, LOW);
+    sendTelemetry(0, 0, "EJECTED_A");
+  }
+  else if (cmd == "MOVE_TO_END") { // Untuk Grade B
+    digitalWrite(PIN_CONVEYOR_DIR, HIGH);
+    analogWrite(PIN_CONVEYOR_PWM, conveyorSpeed);
+    // Jalankan saja terus, misal biarkan jalan 5 detik lalu lapor selesai
+    delay(5000);
     analogWrite(PIN_CONVEYOR_PWM, 0);
-    sendTelemetry(0, 0, "IDLE");
-  }
-  else if (cmd == "TEST_STEPPER") {
-    moveStepper(100, HIGH);
-    sendTelemetry(0, 0, "STEPPER_DONE");
-  }
-  else if (cmd == "START_SOH") {
-    currentState = STATE_SOH_MEASURING;
-  }
-  else if (cmd == "SORT") {
-    String grade = doc["grade"];
-    if (grade == "A") executeSort('A');
-    else if (grade == "B") executeSort('B');
-    else if (grade == "R") executeSort('R');
+    sendTelemetry(0, 0, "DROPPED_B");
   }
 }
 
-void measureSOH() {
-  // Simulasi nyalakan beban
-  analogWrite(PIN_LOAD_PWM, 128); 
-  delay(10); // Waktu stabilisasi (Gunakan millis() untuk non-blocking di versi final)
-  
-  int rawV = analogRead(PIN_VOLT_SENSE);
-  int rawI = analogRead(PIN_CURR_SENSE);
-  
-  // Konversi kasar ke float (Sesuaikan pengali dengan rangkaian)
-  float volt = (rawV / 1023.0) * 3.3 * 2.0; 
-  float curr = (rawI / 1023.0) * 3.3;
-
-  analogWrite(PIN_LOAD_PWM, 0); // Matikan beban
-  
-  sendTelemetry(volt, curr, "MEASURING_DONE");
-  currentState = STATE_IDLE;
-}
-
-void executeSort(char grade) {
-  currentState = STATE_SORTING;
-  
-  if (grade == 'A') {
-    moveStepper(200, HIGH); // Maju 200 step
-  } else if (grade == 'R') {
-    moveStepper(200, LOW);  // Mundur 200 step
-  }
-
-  sendTelemetry(0, 0, "SORT_DONE");
-  currentState = STATE_IDLE;
-}
-
-void moveStepper(int steps, int dir) {
-  digitalWrite(PIN_STEPPER_EN, LOW); // Enable
-  digitalWrite(PIN_STEPPER_DIR, dir);
-  
+void moveStepper(int pinStep, int pinDir, int pinEn, int steps, int dir) {
+  digitalWrite(pinEn, LOW); // Enable
+  digitalWrite(pinDir, dir);
   for(int i=0; i<steps; i++) {
-    digitalWrite(PIN_STEPPER_STEP, HIGH);
-    delayMicroseconds(500); // Kecepatan motor
-    digitalWrite(PIN_STEPPER_STEP, LOW);
-    delayMicroseconds(500);
+    digitalWrite(pinStep, HIGH);
+    delayMicroseconds(400); 
+    digitalWrite(pinStep, LOW);
+    delayMicroseconds(400);
   }
-  
-  digitalWrite(PIN_STEPPER_EN, HIGH); // Disable untuk hemat arus
+  digitalWrite(pinEn, HIGH); // Disable
 }
 
 void sendTelemetry(float v, float i, const char* status) {
-  // Kirim data format JSON kembali ke Jetson
   StaticJsonDocument<200> doc;
   doc["volt"] = v;
   doc["curr"] = i;
   doc["status"] = status;
-  
   serializeJson(doc, Serial);
-  Serial.println(); // Terminator
+  Serial.println();
 }

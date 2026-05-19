@@ -1,67 +1,68 @@
-# Implementation Plan: RECELL-AI Battery Classification
+# Rencana Implementasi: Sistem Klasifikasi Baterai RECELL-AI
 
-**Project:** RECELL-AI
-**AI Model:** YOLOv8n (Nano)
+**Proyek:** RECELL-AI
+**Model AI:** YOLOv8n (Nano) & XGBoost
 **Platform:** Jetson Orin Nano + STM32F411
-**Timeline Goal:** KIWIE Korea 2026
+**Target Waktu:** Kompetisi KIWIE Korea 2026
 
 ---
 
-## Phase 1: Environment & AI Setup (Jetson)
-*Goal: Get YOLOv8n running at maximum performance on Orin Nano.*
+## Fase 1: Lingkungan & Setup AI (Jetson)
+*Tujuan: Menjalankan YOLOv8n dan XGBoost dengan performa maksimal di Orin Nano.*
 
-1.  **System Preparation:**
-    *   Install JetPack 6.x (Ubuntu 22.04).
-    *   Install Python 3.10, PyTorch (Jetson version), and Ultralytics.
-2.  **Model Optimization:**
-    *   Train YOLOv8n on the custom battery dataset (Normal, Rust, Dent).
-    *   **Export to TensorRT (`.engine`):** This is critical for 30+ FPS inference on the Orin Nano.
-3.  **Vision Pipeline:**
-    *   Implement an asynchronous camera thread (OpenCV/GStreamer).
-    *   Create a detection wrapper that returns a "Physical Health Score".
-
----
-
-## Phase 2: Firmware Development (STM32)
-*Goal: Reliable sensor reading and motor execution.*
-
-1.  **Peripherals Initialization:**
-    *   **ADC + DMA:** For high-speed, low-jitter voltage and current sampling.
-    *   **PWM/Timers:** For Stepper motor control and Electronic Load management.
-    *   **UART (USB-CDC):** For communication with Jetson.
-2.  **Core Logic:**
-    *   Implement **Constant Current Load** control loop (PID or simple threshold).
-    *   Calculate SoH based on discharge curve parameters.
-3.  **Command Execution:**
-    *   Implement a parser for commands like `START_TEST`, `MOVE_CONVEYOR`, `SORT_A/B/C`.
+1.  **Persiapan Sistem:**
+    *   Instalasi JetPack 6.x (Ubuntu 22.04).
+    *   Instalasi Python 3.10, PyTorch (versi khusus Jetson), dan Ultralytics.
+2.  **Optimasi Model (Vision):**
+    *   Latih (Train) YOLOv8n menggunakan dataset khusus baterai (Normal, Karat, Penyok).
+    *   **Ekspor ke TensorRT (`.engine`):** Langkah krusial ini memastikan inferensi berjalan pada 30+ FPS di Orin Nano.
+3.  **Pipeline Visual:**
+    *   Implementasikan *thread* kamera asinkron (menggunakan OpenCV/GStreamer).
+    *   Buat fungsi *wrapper* deteksi yang mengembalikan "Skor Kesehatan Fisik".
 
 ---
 
-## Phase 3: Communication & Protocol
-*Goal: Fast and fail-safe data exchange.*
+## Fase 2: Pengembangan Firmware (STM32)
+*Tujuan: Pembacaan sensor yang presisi dan eksekusi motor yang handal.*
 
-1.  **Protocol Definition:** Use a structured packet format (JSON-like or COBS-encoded binary).
-2.  **Handshake:** Ensure Jetson and STM32 verify connection on startup.
-3.  **Error Handling:** Define behavior if serial disconnects or a battery gets stuck.
-
----
-
-## Phase 4: Integration & Mechanical Testing
-*Goal: Full system automation.*
-
-1.  **Sequence Logic:**
-    *   `Step 1`: Conveyor moves battery to Vision Station.
-    *   `Step 2`: Jetson triggers YOLOv8n -> Physical Check.
-    *   `Step 3`: Conveyor moves battery to Electrical Station.
-    *   `Step 4`: STM32 runs SoH test -> Sends data to Jetson.
-    *   `Step 5`: Jetson decides Final Grade -> STM32 sorts via Stepper.
-2.  **Fine-tuning:** Adjust motor speeds and sensor calibration.
+1.  **Inisialisasi Periferal:**
+    *   **ADC (12-bit) + Oversampling:** Untuk pembacaan tegangan dan arus berkecepatan tinggi dengan tingkat *noise* yang sangat minim.
+    *   **PWM/Timers:** Untuk kontrol motor Stepper dan manajemen beban elektronik (Electronic Load).
+    *   **UART (USB-CDC):** Untuk komunikasi Serial berkecepatan tinggi dengan Jetson.
+2.  **Logika Inti:**
+    *   Terapkan *loop* kontrol **Beban Arus Konstan (Constant Current Load)** menggunakan kontrol PWM.
+    *   Hitung *Voltage Drop* untuk dikirim ke Jetson.
+3.  **Eksekusi Perintah:**
+    *   Buat *parser* (pembaca) JSON untuk perintah seperti `START_SOH`, `MOVE_CONVEYOR`, `EJECT_A`.
 
 ---
 
-## Phase 5: Documentation & Final Polish
-*Goal: KIWIE Competition Readiness.*
+## Fase 3: Komunikasi & Protokol
+*Tujuan: Pertukaran data yang cepat dan aman dari kegagalan (fail-safe).*
 
-1.  **Data Logging:** Jetson logs every test result to a CSV/Database for the "Judging Report".
-2.  **UI/Dashboard:** (Optional) Simple GUI on Jetson to show real-time grading status.
-3.  **Final Documentation:** Update HKI and Technical Specs with real-world test data.
+1.  **Definisi Protokol:** Menggunakan format paket terstruktur berbasis JSON (*Line-terminated*).
+2.  **Handshake:** Memastikan Jetson dan STM32 memverifikasi koneksi (Ping) saat mesin dinyalakan.
+3.  **Penanganan Error:** Menentukan perilaku sistem jika koneksi Serial terputus atau baterai tersangkut di konveyor (masuk ke mode aman/Safe Mode).
+
+---
+
+## Fase 4: Integrasi & Pengujian Mekanik
+*Tujuan: Otomatisasi sistem secara penuh.*
+
+1.  **Logika Sekuensial (Urutan Kerja):**
+    *   `Langkah 1`: Jetson mengevaluasi Visi (YOLO) dan menyimpan skornya.
+    *   `Langkah 2`: Konveyor membawa baterai menuju Stasiun Uji (berhenti di Proximity 1).
+    *   `Langkah 3`: STM32 menempelkan sensor dan menjalankan uji Beban Arus Konstan -> Mengirim data kelistrikan ke Jetson.
+    *   `Langkah 4`: Jetson menggunakan XGBoost untuk menghitung SoH, menggabungkan data, dan menentukan Grade Akhir.
+    *   `Langkah 5`: Jetson mencetak Paspor Digital (PDF).
+    *   `Langkah 6`: STM32 menyortir baterai (Eject ke Grade A di Proximity 2, atau biarkan jatuh untuk Grade B/Reject).
+2.  **Penyetelan (Fine-tuning):** Menyesuaikan kecepatan motor stepper dan tingkat sensitivitas sensor batas (*limit sensors*).
+
+---
+
+## Fase 5: Dokumentasi & Penyempurnaan Akhir
+*Tujuan: Kesiapan 100% untuk Kompetisi KIWIE.*
+
+1.  **Dashboard Industri (HMI):** Menjalankan UI PyQt5 (dengan *live graphing* tegangan/arus menggunakan OpenGL) di layar penuh Jetson.
+2.  **Pencatatan Data (Data Logging):** Jetson mencatat setiap hasil tes ke dalam *database* lokal/CSV sebagai bukti ketertelusuran industri (Traceability).
+3.  **Dokumentasi Final:** Memperbarui Hak Kekayaan Intelektual (HKI) dan Spesifikasi Teknis dengan mencantumkan data pengujian dunia nyata.

@@ -1,69 +1,57 @@
-# Software Architecture Design: RECELL-AI
+# Desain Arsitektur Perangkat Lunak: RECELL-AI
 
-**Project:** RECELL-AI Battery Classification
-**Master:** Jetson Orin Nano (AI, Logic, UI)
-**Slave:** STM32F411 (Sensors, Actuators, Motion)
-**Communication:** USB-Serial (115200 bps recommended)
-
----
-
-## 1. High-Level System Flow
-1. **Trigger:** Battery enters the conveyor/station (detected by sensor).
-2. **Vision Phase (Jetson):** Capture image -> Run AI Inference -> Detect Physical Anomaly.
-3. **Electrical Phase (STM32):** Load applied -> Measure V/I -> Calculate SoH.
-4. **Decision (Jetson):** Combine Physical + Electrical data -> Determine Grade (A/B/Recycle).
-5. **Action (STM32):** Jetson sends command -> STM32 activates Stepper Sorting Mechanism.
+**Proyek:** Sistem Klasifikasi Baterai RECELL-AI
+**Master (Pusat Kendali):** Jetson Orin Nano (AI, Logika, Antarmuka UI)
+**Slave (Perangkat Keras):** STM32F411 (Sensor, Aktuator, Kendali Gerak)
+**Komunikasi:** USB-Serial (direkomendasikan 115200 bps)
 
 ---
 
-## 2. Jetson Orin Nano Architecture (Master)
-The Jetson software will be Python-based for flexibility with AI libraries.
-
-### Modules:
-*   **Vision Engine:** OpenCV + TensorRT (Inference). Processes camera stream.
-*   **Communication Manager:** Handles Serial I/O (PySerial). Manages command queue to STM32.
-*   **Decision Logic:** Aggregates AI results and STM32 sensor data to finalize the grade.
-*   **Main Coordinator:** Asynchronous loop managing state transitions.
+## 1. Alur Sistem Tingkat Tinggi (High-Level Flow)
+1. **Pemicu (Trigger):** Baterai masuk ke stasiun pengujian (dideteksi oleh sensor Proximity).
+2. **Fase Visual (Jetson):** Mengambil gambar -> Menjalankan Inferensi AI -> Mendeteksi anomali fisik.
+3. **Fase Elektrik (STM32):** Menerapkan beban konstan (Load) -> Mengukur Tegangan/Arus secara presisi -> Mengirim data ke Jetson.
+4. **Fase Keputusan (Jetson):** Menggabungkan data Visual (YOLO) + Elektrik (XGBoost) -> Menentukan Grade (A/B/Recycle) -> Mencetak Paspor PDF.
+5. **Aksi (STM32):** Jetson mengirim perintah sortir -> STM32 mengaktifkan mekanisme Motor Stepper.
 
 ---
 
-## 3. STM32F411 Architecture (Slave)
-The STM32 firmware will be C-based (HAL/LL) focusing on deterministic timing.
+## 2. Arsitektur Jetson Orin Nano (Master)
+Perangkat lunak Jetson berbasis Python agar fleksibel dengan berbagai library AI modern.
 
-### Key Tasks:
-*   **State Machine:**
-    *   `IDLE`: Waiting for commands.
-    *   `MEASURING`: Controlling Constant Current Load and reading ADC.
-    *   `SORTING`: Executing stepper motor sequences.
-*   **Interrupts:**
-    *   `UART_RX_IRQ`: For fast command receiving from Jetson.
-    *   `TIMER_IRQ`: For precise PWM (Stepper) and ADC sampling frequency.
+### Modul Utama:
+*   **Mesin Visual (Vision Engine):** OpenCV + TensorRT (Inferensi). Memproses siaran langsung dari kamera.
+*   **Manajer Komunikasi:** Menangani input/output Serial (PySerial) dengan format JSON.
+*   **Mesin Prediksi Elektrik:** XGBoost Regressor untuk memprediksi State of Health (SoH).
+*   **Antarmuka Pengguna (UI):** PyQt5 dengan PyQTGraph (Akselerasi OpenGL) untuk pemantauan *real-time*.
+*   **Koordinator Utama (Orchestrator):** Alur kerja asinkron (*Multithreading*) yang mengatur perpindahan State.
 
 ---
 
-## 4. Communication Protocol (Serial JSON or Binary)
-*Example Command Format (Jetson to STM32):*
-`{"cmd": "SORT", "grade": "A"}`
+## 3. Arsitektur STM32F411 (Slave)
+Firmware STM32 berbasis C++ (Arduino IDE / STM32duino) dengan fokus pada waktu eksekusi yang deterministik.
 
-*Example Feedback Format (STM32 to Jetson):*
-`{"status": "READY", "volt": 3.75, "curr": 1.0}`
+### Tugas Utama:
+*   **State Machine (Mesin Status):**
+    *   `IDLE`: Menunggu perintah dari Jetson.
+    *   `STATE_WAIT_PROX_1 / 2`: Konveyor berjalan pelan menunggu baterai menyentuh sensor.
+    *   `MEASURING`: Menempelkan pin sensor, mengontrol beban MOSFET (Constant Current), dan membaca ADC 12-bit dengan teknik Oversampling 50x.
+    *   `SORTING`: Mengeksekusi urutan langkah (*steps*) motor stepper dengan cepat.
 
 ---
 
-## 5. Directory Structure for Implementation
-```
+## 4. Struktur Direktori Implementasi (Monorepo)
+```text
 RECELL-AI/
+├── docs/                   # Cheatsheet rumus & Panduan Deployment
 ├── firmware/
-│   ├── Core/
-│   │   ├── src/ (Main, State Machine, ISRs)
-│   │   └── inc/ (Protocol definitions)
-│   └── Drivers/
+│   └── RECELL_STM32/       # Kode C++ untuk Arduino IDE (.ino)
 ├── jetson/
-│   ├── models/ (TensorRT engines)
-│   ├── src/
-│   │   ├── vision/ (Camera & AI inference)
-│   │   ├── serial_comm/ (Communication wrapper)
-│   │   └── core/ (Main logic & state)
-│   └── requirements.txt
-└── ...
+│   ├── datasets/           # Data mentah untuk training (Gambar & CSV)
+│   ├── models/             # Bobot (weights) YOLO & XGBoost yang sudah dilatih
+│   ├── notebooks/          # Skrip Google Colab (.ipynb)
+│   ├── scripts/            # Skrip utilitas (Data parser, Trainer)
+│   └── src/                # Kode sumber utama Python (main.py, ui_dashboard.py)
+├── research/               # Riset ilmiah, arsitektur, dan kode visualisasi grafik
+└── setup.sh                # Skrip instalasi otomatis untuk OS Jetson
 ```

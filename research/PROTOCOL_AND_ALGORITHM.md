@@ -1,73 +1,73 @@
-# RECELL-AI Communication Protocol & Algorithm Specification
+# Spesifikasi Protokol Komunikasi & Algoritma RECELL-AI
 
-**Version:** 1.0 (Mature Draft)
-**Interface:** USB-Serial (115200 bps)
-**Format:** Line-terminated JSON
-
----
-
-## 1. Communication Protocol (JSON Schema)
-
-### 1.1. Jetson to STM32 (Commands)
-The Master (Jetson) controls the process flow.
-
-| Command | Parameters | Description |
-| :--- | :--- | :--- |
-| `PING` | None | Heartbeat/Connectivity check. |
-| `START_SOH` | `{"duration": 5000}` | Triggers CC Load measurement for X ms. |
-| `MOVE_CONVEYOR` | `{"dir": 1, "dist": 100}` | Moves conveyor belt. |
-| `SORT` | `{"grade": "A" \| "B" \| "R"}` | Triggers sorting stepper to specific bin. |
-| `RESET` | None | Resets STM32 state machine. |
-
-**Example:** `{"cmd": "SORT", "grade": "A"}\n`
-
-### 1.2. STM32 to Jetson (Telemetry & Events)
-The Slave (STM32) reports measurements and completion status.
-
-| Event Type | Fields | Description |
-| :--- | :--- | :--- |
-| `STATUS` | `{"state": "IDLE" \| "BUSY" \| "ERROR"}` | Current STM32 status. |
-| `MEASUREMENT` | `{"v": 3.72, "i": 1.05, "t": 32.5}` | Real-time V, I, and Temperature. |
-| `SOH_RESULT` | `{"soh": 85.2, "internal_r": 0.12}` | Final calculated electrical health. |
-| `DONE` | `{"op": "SORT" \| "MEASURE"}` | Confirmation of task completion. |
-
-**Example:** `{"type": "MEASUREMENT", "v": 3.8, "i": 1.0}\n`
+**Versi:** 1.0 (Draf Matang)
+**Antarmuka:** USB-Serial (115200 bps)
+**Format:** JSON (diakhiri dengan baris baru / newline)
 
 ---
 
-## 2. Grading Algorithm Structure (Multi-Modal)
+## 1. Protokol Komunikasi (Skema JSON)
 
-The final decision is a fusion of **Computer Vision (CV)** and **Electrical Analysis (EA)**.
+### 1.1. Jetson ke STM32 (Perintah / Commands)
+Master (Jetson) mengontrol alur proses.
 
-### 2.1. Vision Score (VS) - YOLOv8n
-*   **Input:** Camera frames.
-*   **Classes:** `normal`, `rust`, `dent`, `leaking`.
-*   **Logic:** 
-    *   If `leaking` or `major_dent` detected -> **Grade R (Reject)** immediately.
-    *   If `rust` detected -> Penalty applied to Vision Score.
-
-### 2.2. Electrical Score (ES) - Constant Current Load
-*   **Method:** Discharging at 1C (approx 1-2A) for a short burst.
-*   **Metric:** Voltage drop ($\Delta V$) used to calculate Internal Resistance ($R_i = \Delta V / I$).
-*   **SoH Calculation:** Based on $R_i$ and Discharge Curve stability.
-
-### 2.3. Final Grade Decision Table
-| Vision Condition | SoH (Electrical) | Final Grade |
+| Perintah | Parameter | Deskripsi |
 | :--- | :--- | :--- |
-| Clean | > 80% | **Grade A** |
-| Minor Rust/Dent | > 75% | **Grade B** |
-| Clean | 60% - 80% | **Grade B** |
-| Any Major Damage | Any | **Grade R (Recycle)** |
-| Clean | < 60% | **Grade R (Recycle)** |
+| `PING` | Tidak ada | Pengecekan konektivitas (Heartbeat). |
+| `START_SOH` | `{"duration": 5000}` | Memicu pengukuran Beban Arus Konstan selama X ms. |
+| `MOVE_CONVEYOR` | `{"dir": 1, "dist": 100}` | Menggerakkan sabuk konveyor. |
+| `SORT` | `{"grade": "A" \| "B" \| "R"}` | Memicu stepper penyortir ke keranjang tertentu. |
+| `RESET` | Tidak ada | Mereset State Machine di STM32. |
+
+**Contoh:** `{"cmd": "SORT", "grade": "A"}\n`
+
+### 1.2. STM32 ke Jetson (Telemetri & Event)
+Slave (STM32) melaporkan hasil pengukuran dan status penyelesaian tugas.
+
+| Tipe Event | Kolom / Fields | Deskripsi |
+| :--- | :--- | :--- |
+| `STATUS` | `{"state": "IDLE" \| "BUSY" \| "ERROR"}` | Status STM32 saat ini. |
+| `MEASUREMENT` | `{"v": 3.72, "i": 1.05, "t": 32.5}` | Tegangan, Arus, dan Suhu secara real-time. |
+| `SOH_RESULT` | `{"soh": 85.2, "internal_r": 0.12}` | Hasil kalkulasi kesehatan baterai akhir. |
+| `DONE` | `{"op": "SORT" \| "MEASURE"}` | Konfirmasi bahwa tugas telah selesai. |
+
+**Contoh:** `{"type": "MEASUREMENT", "v": 3.8, "i": 1.0}\n`
 
 ---
 
-## 3. System State Machine (Combined)
+## 2. Struktur Algoritma Penilaian (Multimodal)
 
-1. **BOOT**: Jetson & STM32 handshake.
-2. **FEEDING**: STM32 moves conveyor until IR/Proximity sensor triggers.
-3. **INSPECTION_V**: Jetson runs YOLOv8n -> Saves VS.
-4. **INSPECTION_E**: STM32 runs CC Load -> Sends ES to Jetson.
-5. **DECISION**: Jetson calculates Final Grade.
-6. **SORTING**: Jetson commands `SORT {grade}` -> STM32 moves Stepper.
-7. **FINISH**: Log results to CSV/DB -> Repeat.
+Keputusan akhir merupakan perpaduan (*fusion*) antara **Computer Vision (CV)** dan **Analisis Kelistrikan (EA)**.
+
+### 2.1. Skor Visual (VS) - YOLOv8n
+*   **Input:** Frame dari kamera.
+*   **Kelas:** `normal`, `rust` (karat), `dent` (penyok), `leaking` (bocor).
+*   **Logika:** 
+    *   Jika `leaking` atau `major_dent` terdeteksi -> **Grade R (Reject/Daur Ulang)** seketika.
+    *   Jika `rust` terdeteksi -> Penalti pengurangan poin diterapkan pada Skor Visual.
+
+### 2.2. Skor Elektrik (ES) - Beban Arus Konstan (Constant Current Load)
+*   **Metode:** Pengosongan (discharge) sebesar 1C (sekitar 1-2A) untuk durasi singkat (misal 2 detik).
+*   **Metrik:** Penurunan tegangan ($\Delta V$) digunakan untuk menghitung Resistansi Internal ($R_i = \Delta V / I$).
+*   **Kalkulasi SoH:** Prediksi berbasis *Machine Learning* (XGBoost) pada kurva pengosongan.
+
+### 2.3. Tabel Keputusan Grade Akhir
+| Kondisi Visual | SoH (Elektrik) | Grade Akhir |
+| :--- | :--- | :--- |
+| Bersih | > 80% | **Grade A** |
+| Karat/Penyok Minor | > 75% | **Grade B** |
+| Bersih | 60% - 80% | **Grade B** |
+| Kerusakan Mayor | Berapa pun | **Grade R (Reject)** |
+| Bersih | < 60% | **Grade R (Reject)** |
+
+---
+
+## 3. Sistem State Machine (Gabungan)
+
+1. **BOOT**: Handshake antara Jetson & STM32.
+2. **FEEDING**: STM32 menggerakkan konveyor hingga sensor Proximity 1 mendeteksi baterai.
+3. **INSPECTION_V**: Jetson menjalankan YOLOv8n -> Menyimpan Skor Visual (VS).
+4. **INSPECTION_E**: STM32 menempelkan sensor dan menjalankan tes CC Load -> Mengirim hasil ke Jetson.
+5. **DECISION**: Jetson memprediksi SoH menggunakan XGBoost dan mengkalkulasi Grade Akhir. Jetson membuat PDF Paspor Baterai.
+6. **SORTING**: Jetson mengirim perintah `SORT {grade}` -> STM32 menggerakkan konveyor dan Stepper Ejector.
+7. **FINISH**: Catat hasil ke Database lokal -> Ulangi siklus.

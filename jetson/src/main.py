@@ -6,12 +6,15 @@ import json
 import argparse
 import sys
 import os
+import xgboost as xgb
+import pandas as pd
 from passport_generator import BatteryPassport
 
 # Default Configuration
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
 MODEL_PATH = 'models/recell_yolo_v8n.engine'
+XGB_MODEL_PATH = 'models/weights/soh_xgb_model.json'
 PASSPORT_DIR = 'data/passports'
 
 class RecellMaster:
@@ -32,6 +35,7 @@ class RecellMaster:
         print(f"Mock AI Mode    : {self.mock_ai}")
         print("===================================")
 
+        # Initialize Vision (YOLO)
         if not self.mock_ai:
             try:
                 from ultralytics import YOLO
@@ -40,6 +44,16 @@ class RecellMaster:
             except Exception as e:
                 print(f"[AI] Failed to load YOLO: {e}. Falling back to MOCK_AI.")
                 self.mock_ai = True
+
+        # Initialize Electrical SOH AI (XGBoost)
+        self.xgb_model = xgb.XGBRegressor()
+        try:
+            self.xgb_model.load_model(XGB_MODEL_PATH)
+            print(f"[AI] Loaded XGBoost SOH Model from {XGB_MODEL_PATH}")
+            self.has_xgb = True
+        except Exception as e:
+            print(f"[AI] Failed to load XGBoost: {e}. Will use hardcoded SOH rules.")
+            self.has_xgb = False
 
         if not self.simulate:
             try:
@@ -82,14 +96,28 @@ class RecellMaster:
                 line = self.ser.readline().decode('utf-8').strip()
                 try:
                     data = json.loads(line)
-                    # Uncomment below for verbose debug
-                    # print(f"\r[STM32] {data}\nCMD> ", end="")
                     
                     if data.get("status") == "MEASUREMENT_DONE":
-                        self.electrical_data["volt"] = data.get("volt", 0)
-                        self.electrical_data["curr"] = data.get("curr", 0)
-                        # Placeholder: Calculate SoH based on V drop
-                        self.electrical_data["soh"] = 85.0 if data.get("volt", 0) > 3.6 else 40.0
+                        v = data.get("volt", 0)
+                        i = data.get("curr", 0.001) # Avoid div zero
+                        
+                        self.electrical_data["volt"] = v
+                        self.electrical_data["curr"] = i
+                        
+                        # Calculate SOH using XGBoost if available, else fallback rule
+                        if self.has_xgb:
+                            # Features must match training script
+                            v_drop = 4.2 - v # Assuming 4.2V is full
+                            internal_r = v_drop / i
+                            temp_delta = 1.0 # Mock temperature sensor reading
+                            
+                            features = pd.DataFrame([[v_drop, internal_r, temp_delta]], 
+                                                  columns=['v_drop', 'internal_r', 'temp_delta'])
+                            pred_soh = self.xgb_model.predict(features)[0]
+                            self.electrical_data["soh"] = max(0, min(100, float(pred_soh)))
+                        else:
+                            self.electrical_data["soh"] = 85.0 if v > 3.6 else 40.0
+                            
                         self.wait_flag = False
                         
                     elif data.get("status") in ["AT_PROX_1", "AT_PROX_2", "EJECTED_A", "DROPPED_B"]:
@@ -105,7 +133,16 @@ class RecellMaster:
         payload = json.dumps(packet) + '\n'
         if self.simulate:
             print(f"\n[Simulate-TX] {payload.strip()}")
-            self.wait_flag = False # Auto-unblock for simulation
+            # If measuring in sim, auto-inject mock result
+            if cmd == "APPLY_SENSOR_AND_MEASURE":
+                self.electrical_data["volt"] = 3.8
+                self.electrical_data["curr"] = 1.2
+                if self.has_xgb:
+                    features = pd.DataFrame([[0.4, 0.33, 1.0]], columns=['v_drop', 'internal_r', 'temp_delta'])
+                    self.electrical_data["soh"] = float(self.xgb_model.predict(features)[0])
+                else:
+                    self.electrical_data["soh"] = 85.0
+            self.wait_flag = False 
         else:
             if self.ser: self.ser.write(payload.encode())
 
@@ -120,31 +157,26 @@ class RecellMaster:
         battery_id = f"BAT_{int(time.time())}"
         img_path = f"data/{battery_id}.jpg"
         
-        # Capture AI Vision state before moving
         print("[1] Evaluating Vision...")
-        time.sleep(1) # Let AI stabilize
+        time.sleep(1) 
         if self.latest_frame is not None:
             cv2.imwrite(img_path, self.latest_frame)
-        elif self.simulate: # Create mock image if testing
+        elif self.simulate: 
             with open(img_path, 'w') as f: f.write("mock")
 
-        # Step 1: Move to Sensor Station
         print("[2] Moving to Sensor Station (PROX 1)...")
         self.wait_flag = True
         self.send_command("MOVE_TO_PROX_1")
         while self.wait_flag: time.sleep(0.1)
 
-        # Step 2: Push sensor & Measure
         print("[3] Pushing Sensor and Measuring...")
         self.wait_flag = True
         self.send_command("APPLY_SENSOR_AND_MEASURE")
         while self.wait_flag: time.sleep(0.1)
         
-        # Step 3: Decision
         grade = self.calculate_final_grade()
-        print(f"[4] Grading Decision: {grade} (VS: {self.vision_score:.2f}, SOH: {self.electrical_data['soh']}%)")
+        print(f"[4] Grading Decision: {grade} (VS: {self.vision_score:.2f}, SOH: {self.electrical_data['soh']:.1f}%)")
         
-        # Generate Passport PDF
         pdf_path = self.passport_gen.generate_pdf(
             battery_id=battery_id, grade=grade, vision_score=self.vision_score,
             volt=self.electrical_data['volt'], curr=self.electrical_data['curr'],
@@ -152,7 +184,6 @@ class RecellMaster:
         )
         print(f"[5] Battery Passport Generated: {pdf_path}")
 
-        # Step 4: Routing
         if grade == "A":
             print("[6] Routing to Grade A Bin (PROX 2)...")
             self.wait_flag = True
@@ -176,14 +207,12 @@ class RecellMaster:
         print("1: Full Automated Cycle")
         print("q: Quit")
         
-        # Ensure data folder exists
         if not os.path.exists("data"): os.makedirs("data")
 
         while self.running:
             try:
                 choice = input("CMD> ").strip()
                 if choice == '1': 
-                    # Run in a separate thread so listener continues
                     threading.Thread(target=self.run_automated_cycle).start()
                 elif choice.lower() == 'q':
                     self.running = False

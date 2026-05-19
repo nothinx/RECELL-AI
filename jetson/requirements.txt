@@ -22,6 +22,8 @@ fastapi==0.110.0          # High-performance API backend
 uvicorn[standard]==0.27.1 # ASGI Server for FastAPI
 pydantic==2.6.3           # Data validation (JSON schemas)
 pyyaml==6.0.1             # Configuration file management (config.yaml)
+PyQt5==5.15.10            # Desktop GUI Framework
+pyqtgraph==0.13.3         # High-performance real-time plotting for UI
 
 # 5. IoT & Cloud Analytics
 paho-mqtt==2.0.0          # MQTT Client for pushing data to Cloud/InfluxDB
@@ -30,3 +32,4 @@ paho-mqtt==2.0.0          # MQTT Client for pushing data to Cloud/InfluxDB
 loguru==0.7.2             # Structured, rotating, JSON-friendly logging
 SQLAlchemy==2.0.27        # ORM for SQLite/TimescaleDB local database
 fpdf==1.7.2               # PDF generation for Battery Passports
+scipy==1.12.0             # To read MATLAB (.mat) files from NASA dataset

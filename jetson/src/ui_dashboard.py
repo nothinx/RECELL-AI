@@ -2,12 +2,20 @@ import sys
 import cv2
 import numpy as np
 import threading
+import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QWidget, QGroupBox, 
-                             QPlainTextEdit, QGridLayout)
+                             QPlainTextEdit, QGridLayout, QProgressBar)
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QImage, QPixmap
 import pyqtgraph as pg  # INDUSTRIAL GRAPHING LIBRARY
+
+# Enable Hardware Acceleration (OpenGL) for ultra-fast plotting on Jetson
+try:
+    pg.setConfigOptions(useOpenGL=True)
+except Exception:
+    pass # Fallback to standard rendering if OpenGL fails on specific Jetson setups
+pg.setConfigOptions(antialias=True)
 
 # Import core master logic
 from main import RecellMaster
@@ -17,6 +25,7 @@ class UIBridge(QObject):
     frame_signal = pyqtSignal(np.ndarray)
     telemetry_signal = pyqtSignal(dict)
     log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int)
 
 class RecellDashboard(QMainWindow):
     def __init__(self):
@@ -32,6 +41,8 @@ class RecellDashboard(QMainWindow):
             QLabel { color: #FFFFFF; }
             QPushButton { border-radius: 4px; font-weight: bold; }
             QPlainTextEdit { background-color: #0A0A0A; color: #00FF00; border: 1px solid #333; }
+            QProgressBar { border: 1px solid #555; border-radius: 5px; text-align: center; font-weight: bold; color: white; background-color: #222; }
+            QProgressBar::chunk { background-color: #00E676; width: 10px; margin: 1px; }
         """)
 
         # Plot Data Buffers
@@ -48,6 +59,7 @@ class RecellDashboard(QMainWindow):
         self.bridge.frame_signal.connect(self.update_camera_frame)
         self.bridge.telemetry_signal.connect(self.update_telemetry)
         self.bridge.log_signal.connect(self.log_msg)
+        self.bridge.progress_signal.connect(self.update_progress)
 
         # Initialize Master Controller in background
         self.init_master()
@@ -57,11 +69,22 @@ class RecellDashboard(QMainWindow):
         callbacks = {
             'on_frame': self.bridge.frame_signal.emit,
             'on_telemetry': self.bridge.telemetry_signal.emit,
-            'on_log': self.bridge.log_signal.emit
+            'on_log': self.bridge.log_signal.emit,
+            'on_progress': self.bridge.progress_signal.emit
         }
         
         # NOTE: Change simulate=False when hardware is connected
         self.master = RecellMaster(simulate=True, mock_ai=True, ui_callbacks=callbacks)
+        
+        # Inject progress reporting into master's run_automated_cycle
+        original_run = self.master.run_automated_cycle
+        def hooked_run():
+            self.master.ui_callbacks.get('on_progress', lambda x: None)(10)
+            original_run()
+            self.master.ui_callbacks.get('on_progress', lambda x: None)(100)
+            
+        self.master.run_automated_cycle = hooked_run
+
         self.master_thread = threading.Thread(target=self.master.run, daemon=True)
         self.master_thread.start()
 
@@ -76,6 +99,12 @@ class RecellDashboard(QMainWindow):
         header_label.setAlignment(Qt.AlignCenter)
         header_label.setStyleSheet("color: #00E676; padding: 10px; background-color: #1A1A1A; border-radius: 5px;")
         main_layout.addWidget(header_label)
+
+        # CYCLE PROGRESS BAR
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(25)
+        main_layout.addWidget(self.progress_bar)
 
         # --- CONTENT LAYOUT ---
         content_layout = QHBoxLayout()
@@ -175,6 +204,7 @@ class RecellDashboard(QMainWindow):
         self.volt_data.clear()
         self.curr_data.clear()
         self.start_time = time.time()
+        self.progress_bar.setValue(0)
         self.lbl_grade.setText("TESTING...")
         self.lbl_grade.setStyleSheet("color: #FFEA00; background: #333;")
         
@@ -184,10 +214,22 @@ class RecellDashboard(QMainWindow):
         self.log_msg(">>> EMERGENCY STOP INITIATED <<<")
         self.master.send_command("STOP_CONVEYOR")
         self.master.wait_flag = False
+        self.progress_bar.setValue(0)
+        self.lbl_grade.setText("ABORTED")
+        self.lbl_grade.setStyleSheet("color: #FF1744; background: #B71C1C;")
 
     def log_msg(self, msg):
         self.log_console.appendPlainText(f"{time.strftime('%H:%M:%S')} | {msg}")
         self.log_console.verticalScrollBar().setValue(self.log_console.verticalScrollBar().maximum())
+        
+        # Update progress bar heuristically based on logs
+        if "Evaluating Vision" in msg: self.progress_bar.setValue(20)
+        elif "Moving to Sensor" in msg: self.progress_bar.setValue(40)
+        elif "Measuring" in msg: self.progress_bar.setValue(60)
+        elif "Grading Decision" in msg: self.progress_bar.setValue(80)
+
+    def update_progress(self, val):
+        self.progress_bar.setValue(val)
 
     def update_telemetry(self, data):
         v = data.get('volt', 0)

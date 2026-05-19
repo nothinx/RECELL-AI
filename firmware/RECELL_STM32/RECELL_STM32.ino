@@ -1,11 +1,12 @@
 /*
  * RECELL-AI Firmware (Arduino IDE / STM32duino)
- * Target: STM32F411
+ * Target: STM32F411CEU6 (BlackPill)
+ * Optimization: 12-bit ADC enabled, Oversampling for High Precision
  */
 
 #include <ArduinoJson.h>
 
-// --- KONFIGURASI PIN (Sesuaikan nanti) ---
+// --- KONFIGURASI PIN ---
 const int PIN_CONVEYOR_PWM = PA1; // PWM Speed (Set sangat lambat)
 const int PIN_CONVEYOR_DIR = PA0;
 
@@ -17,7 +18,7 @@ const int PIN_STP_SENS_DIR = PB10;
 const int PIN_STP_SENS_STP = PB11;
 const int PIN_STP_SENS_EN  = PB12;
 
-// Stepper 2: Pendorong Baterai Grade A (2500 pulse)
+// Stepper 2: Pendorong Baterai Grade A
 const int PIN_STP_EJCT_DIR = PA8;
 const int PIN_STP_EJCT_STP = PA9;
 const int PIN_STP_EJCT_EN  = PA10;
@@ -35,10 +36,14 @@ enum SystemState {
 };
 
 SystemState currentState = STATE_IDLE;
-int conveyorSpeed = 60; // 0-255, kecepatan sangat lambat
+int conveyorSpeed = 60; // 0-255, kecepatan lambat
 
 void setup() {
   Serial.begin(115200); 
+  
+  // OPTIMASI STM32: Gunakan resolusi ADC 12-bit native STM32 (Nilai 0 - 4095)
+  // Ini 4x lebih presisi daripada Arduino Uno biasa (10-bit).
+  analogReadResolution(12);
   
   pinMode(PIN_CONVEYOR_DIR, OUTPUT);
   pinMode(PIN_CONVEYOR_PWM, OUTPUT);
@@ -66,8 +71,8 @@ void loop() {
 
   // --- NON-BLOCKING SENSOR CHECKS ---
   if (currentState == STATE_WAIT_PROX_1) {
-    if (digitalRead(PIN_PROX_1) == LOW) { // Asumsi LOW saat mendeteksi baterai
-      analogWrite(PIN_CONVEYOR_PWM, 0); // Stop konveyor
+    if (digitalRead(PIN_PROX_1) == LOW) {
+      analogWrite(PIN_CONVEYOR_PWM, 0);
       currentState = STATE_IDLE;
       sendTelemetry(0, 0, "AT_PROX_1");
     }
@@ -96,37 +101,47 @@ void processCommand(String jsonStr) {
     currentState = STATE_WAIT_PROX_1;
   }
   else if (cmd == "APPLY_SENSOR_AND_MEASURE") {
-    // 1. Stepper dorong sensor ke baterai
+    // 1. Dorong Sensor
     moveStepper(PIN_STP_SENS_STP, PIN_STP_SENS_DIR, PIN_STP_SENS_EN, 1000, HIGH); 
     
-    // 2. Lakukan pengukuran Constant Current
-    analogWrite(PIN_LOAD_PWM, 128); 
-    delay(2000); // Tahan beban 2 detik (disimulasikan blocking sebentar)
-    float volt = (analogRead(PIN_VOLT_SENSE) / 1023.0) * 3.3 * 2.0; 
-    float curr = (analogRead(PIN_CURR_SENSE) / 1023.0) * 3.3;
-    analogWrite(PIN_LOAD_PWM, 0);
+    // 2. Pengukuran SoH Presisi Tinggi (Oversampling)
+    analogWrite(PIN_LOAD_PWM, 128); // Beban Constant Current ON
+    delay(2000); // Tahan beban untuk melihat Voltage Drop
     
-    // 3. Stepper tarik sensor mundur
+    // OVERSAMPLING: Ambil 50 sampel lalu rata-ratakan untuk membuang noise (Noise Filtering)
+    long sumV = 0, sumI = 0;
+    for(int i = 0; i < 50; i++) {
+      sumV += analogRead(PIN_VOLT_SENSE);
+      sumI += analogRead(PIN_CURR_SENSE);
+      delay(2);
+    }
+    analogWrite(PIN_LOAD_PWM, 0); // Beban OFF
+    
+    float avgRawV = sumV / 50.0;
+    float avgRawI = sumI / 50.0;
+    
+    // Konversi ADC 12-bit (4095) ke Voltage. Kalibrasi pengali (misal x2.0) sesuai Voltage Divider hardware
+    float volt = (avgRawV / 4095.0) * 3.3 * 2.0; 
+    float curr = (avgRawI / 4095.0) * 3.3; // Sesuaikan dengan nilai Shunt Resistor/Op-Amp
+    
+    // 3. Tarik Sensor mundur
     moveStepper(PIN_STP_SENS_STP, PIN_STP_SENS_DIR, PIN_STP_SENS_EN, 1000, LOW);
     
     sendTelemetry(volt, curr, "MEASUREMENT_DONE");
   }
-  else if (cmd == "MOVE_TO_PROX_2") { // Untuk Grade A
+  else if (cmd == "MOVE_TO_PROX_2") {
     digitalWrite(PIN_CONVEYOR_DIR, HIGH);
     analogWrite(PIN_CONVEYOR_PWM, conveyorSpeed);
     currentState = STATE_WAIT_PROX_2;
   }
   else if (cmd == "EJECT_A") {
-    // Stepper dorong baterai Grade A (2500 pulse)
     moveStepper(PIN_STP_EJCT_STP, PIN_STP_EJCT_DIR, PIN_STP_EJCT_EN, 2500, HIGH);
-    // Kembalikan posisi hopper
     moveStepper(PIN_STP_EJCT_STP, PIN_STP_EJCT_DIR, PIN_STP_EJCT_EN, 2500, LOW);
     sendTelemetry(0, 0, "EJECTED_A");
   }
-  else if (cmd == "MOVE_TO_END") { // Untuk Grade B
+  else if (cmd == "MOVE_TO_END") {
     digitalWrite(PIN_CONVEYOR_DIR, HIGH);
     analogWrite(PIN_CONVEYOR_PWM, conveyorSpeed);
-    // Jalankan saja terus, misal biarkan jalan 5 detik lalu lapor selesai
     delay(5000);
     analogWrite(PIN_CONVEYOR_PWM, 0);
     sendTelemetry(0, 0, "DROPPED_B");
@@ -134,21 +149,22 @@ void processCommand(String jsonStr) {
 }
 
 void moveStepper(int pinStep, int pinDir, int pinEn, int steps, int dir) {
-  digitalWrite(pinEn, LOW); // Enable
+  digitalWrite(pinEn, LOW); // Enable Stepper Driver
   digitalWrite(pinDir, dir);
   for(int i=0; i<steps; i++) {
     digitalWrite(pinStep, HIGH);
-    delayMicroseconds(400); 
+    delayMicroseconds(400); // 400us sangat cepat namun tetap aman untuk torsi
     digitalWrite(pinStep, LOW);
     delayMicroseconds(400);
   }
-  digitalWrite(pinEn, HIGH); // Disable
+  digitalWrite(pinEn, HIGH); // Disable Stepper Driver (Hemat listrik & kurangi panas)
 }
 
 void sendTelemetry(float v, float i, const char* status) {
   StaticJsonDocument<200> doc;
-  doc["volt"] = v;
-  doc["curr"] = i;
+  // Membatasi angka di belakang koma untuk efisiensi serial
+  doc["volt"] = serialized(String(v, 3)); 
+  doc["curr"] = serialized(String(i, 3));
   doc["status"] = status;
   serializeJson(doc, Serial);
   Serial.println();

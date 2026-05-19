@@ -1,0 +1,23 @@
+# Compiled binaries
+*.bin
+*.elf
+*.hex
+*.o
+*.obj
+
+# STM32 artifacts
+.mxproject
+*.launch
+Debug/
+Release/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# OS artifacts
+.DS_Store
+Thumbs.db

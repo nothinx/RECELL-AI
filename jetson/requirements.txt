@@ -1,0 +1,31 @@
+# ==========================================
+# RECELL-AI: Jetson Orin Nano Dependencies
+# ==========================================
+
+# 1. Computer Vision & Deep Learning (Vision Score)
+# Note: PyTorch & Torchvision should ideally be installed via NVIDIA's Jetson wheel
+# link: https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048
+ultralytics==8.1.0        # YOLOv8 implementation
+opencv-python-headless==4.9.0.80 # Computer Vision (headless for server/backend)
+
+# 2. Time-Series Machine Learning (Electrical Score)
+xgboost==2.0.3            # For SoH prediction based on discharge curve
+scikit-learn==1.4.1.post1 # Data preprocessing, scaling, and metrics
+pandas==2.2.1             # Data manipulation for discharge curves
+numpy==1.26.4             # Array operations
+
+# 3. Hardware Communication
+pyserial==3.5             # UART/USB communication with STM32
+
+# 4. Backend, API & UI
+fastapi==0.110.0          # High-performance API backend
+uvicorn[standard]==0.27.1 # ASGI Server for FastAPI
+pydantic==2.6.3           # Data validation (JSON schemas)
+pyyaml==6.0.1             # Configuration file management (config.yaml)
+
+# 5. IoT & Cloud Analytics
+paho-mqtt==2.0.0          # MQTT Client for pushing data to Cloud/InfluxDB
+
+# 6. Enterprise Data Logging & Utilities
+loguru==0.7.2             # Structured, rotating, JSON-friendly logging
+SQLAlchemy==2.0.27        # ORM for SQLite/TimescaleDB local database

@@ -28,7 +28,7 @@ class UIBridge(QObject):
     progress_signal = pyqtSignal(int)
 
 class RecellDashboard(QMainWindow):
-    def __init__(self):
+    def __init__(self, simulate=False, mock_ai=False):
         super().__init__()
         self.setWindowTitle("RECELL-AI | Tier-1 Industrial HMI")
         self.setGeometry(50, 50, 1280, 720)
@@ -62,9 +62,9 @@ class RecellDashboard(QMainWindow):
         self.bridge.progress_signal.connect(self.update_progress)
 
         # Initialize Master Controller in background
-        self.init_master()
+        self.init_master(simulate, mock_ai)
 
-    def init_master(self):
+    def init_master(self, simulate, mock_ai):
         self.log_msg("[BOOT] Initializing RECELL-AI Core Engine...")
         callbacks = {
             'on_frame': self.bridge.frame_signal.emit,
@@ -73,8 +73,8 @@ class RecellDashboard(QMainWindow):
             'on_progress': self.bridge.progress_signal.emit
         }
         
-        # NOTE: Change simulate=False when hardware is connected
-        self.master = RecellMaster(simulate=True, mock_ai=True, ui_callbacks=callbacks)
+        # Initialize the master controller with the provided flags
+        self.master = RecellMaster(simulate=simulate, mock_ai=mock_ai, ui_callbacks=callbacks)
         
         # Inject progress reporting into master's run_automated_cycle
         original_run = self.master.run_automated_cycle
@@ -277,7 +277,17 @@ class RecellDashboard(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = RecellDashboard()
+    import argparse
+    parser = argparse.ArgumentParser(description="RECELL-AI Dashboard")
+    parser.add_argument('--sim', action='store_true', help='Run without STM32 connected')
+    parser.add_argument('--mock-ai', action='store_true', help='Run without YOLO/Camera')
+    # Filter out argparse arguments before passing sys.argv to QApplication
+    args, unknown = parser.parse_known_args()
+    
+    # We pass the unknown arguments to QApplication to avoid errors with Qt-specific arguments
+    sys_argv = [sys.argv[0]] + unknown
+    app = QApplication(sys_argv)
+    
+    window = RecellDashboard(simulate=args.sim, mock_ai=args.mock_ai)
     window.show()
     sys.exit(app.exec_())

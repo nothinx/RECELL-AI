@@ -126,14 +126,17 @@ class RecellMaster:
                     if data.get("status") == "MEASUREMENT_DONE":
                         v = data.get("volt", 0)
                         i = data.get("curr", 0.001)
+                        t_delta = float(data.get("temp_delta", 1.0))
                         
                         self.electrical_data["volt"] = v
                         self.electrical_data["curr"] = i
                         
                         if self.has_xgb:
                             v_drop = 4.2 - v
-                            internal_r = v_drop / i
-                            temp_delta = 1.0 
+                            # Prevent ZeroDivisionError if i is exactly 0
+                            safe_i = i if i > 0 else 0.001
+                            internal_r = v_drop / safe_i
+                            temp_delta = t_delta 
                             features = pd.DataFrame([[v_drop, internal_r, temp_delta]], columns=['v_drop', 'internal_r', 'temp_delta'])
                             pred_soh = self.xgb_model.predict(features)[0]
                             self.electrical_data["soh"] = max(0, min(100, float(pred_soh)))

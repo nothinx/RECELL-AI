@@ -13,6 +13,8 @@ xgboost==2.0.3            # For SoH prediction based on discharge curve
 scikit-learn==1.4.1.post1 # Data preprocessing, scaling, and metrics
 pandas==2.2.1             # Data manipulation for discharge curves
 numpy==1.26.4             # Array operations
+matplotlib==3.8.3         # Graph plotting for academic papers
+seaborn==0.13.2           # Advanced visualization for papers
 
 # 3. Hardware Communication
 pyserial==3.5             # UART/USB communication with STM32

@@ -21,26 +21,31 @@ Monorepo ini mengelola seluruh pengembangan, pelatihan AI, dan *deployment firmw
 
 ## 🔌 Pinout Perangkat Keras (STM32F411CEU6)
 
-### Aktuator & Konveyor
+### Aktuator & Konveyor (Motor Driver BTS7960)
 | Pin | Fungsi | Deskripsi |
 | :--- | :--- | :--- |
-| **PA0** | `CONVEYOR_DIR` | Arah Motor Konveyor |
-| **PA1** | `CONVEYOR_PWM` | Kecepatan Motor Konveyor (Timer PWM) |
-| **PB10** | `STP_SENS_DIR` | Arah Stepper 1 (Pendorong Sensor) |
-| **PB11** | `STP_SENS_STP` | Pulsa Stepper 1 (Pendorong Sensor) |
-| **PB12** | `STP_SENS_EN` | Enable Stepper 1 (Pendorong Sensor) |
-| **PA8** | `STP_EJCT_DIR` | Arah Stepper 2 (Ejector Grade A) |
-| **PA9** | `STP_EJCT_STP` | Pulsa Stepper 2 (Ejector Grade A) |
-| **PA10** | `STP_EJCT_EN` | Enable Stepper 2 (Ejector Grade A) |
+| **PA5** | `CONVEYOR_EN` | Enable BTS7960 Motor Driver |
+| **PA1** | `CONVEYOR_RPWM` | Right PWM (Maju) BTS7960 |
+| **PA2** | `CONVEYOR_LPWM` | Left PWM (Mundur) BTS7960 |
+| **PB0** | `STP_DRAIN_DIR` | Arah Stepper 1 (Drain Station) |
+| **PB9** | `STP_DRAIN_PUL` | Pulsa Stepper 1 (Drain Station) |
+| **PA7** | `STP_DRAIN_EN` | Enable / Encoder Stepper 1 (Drain Station) |
+| **PA3** | `STP_SORT_DIR` | Arah Stepper 2 (Sorting Station) |
+| **PA8** | `STP_SORT_PUL` | Pulsa Stepper 2 (Sorting Station) |
+| **PA6** | `STP_SORT_EN` | Enable / Encoder Stepper 2 (Sorting Station) |
 
-### Sensor & Pengukuran
+### Sensor, Limit Switch & Pengukuran
 | Pin | Fungsi | Deskripsi |
 | :--- | :--- | :--- |
-| **PB0** | `PROX_1` | Sensor Jarak (Stasiun Uji) - Input Pullup |
-| **PB1** | `PROX_2` | Sensor Jarak (Keranjang Grade A) - Input Pullup |
-| **PA5** | `LOAD_PWM` | Kontrol Gerbang MOSFET untuk Arus Konstan |
-| **PA6** | `VOLT_SENSE` | ADC Tegangan Baterai (12-bit) |
-| **PA7** | `CURR_SENSE` | ADC Arus via Shunt (12-bit) |
+| **PB15** | `LIMIT_DRAIN` | Limit switch batas gerak stepper Drain Station |
+| **PA4** | `LIMIT_SORTING`| Limit switch batas gerak stepper Sorting Station |
+| **PB14** | `IR_DRAIN` | Sensor Infra Merah pendeteksi baterai di Drain Station |
+| **PB12** | `IR_SORTING` | Sensor Infra Merah pendeteksi baterai di Sorting Station |
+| **PB13** | `IR_BACKUP` | Sensor Infra Merah Cadangan |
+| **PB5** | `EMERGENCY` | Tombol Emergency Stop |
+| **PB1** | `DAC_EN` | Kontrol Enable/Disable DAC (Constant Current Load) |
+| **PB7** | `I2C SDA` | Jalur Data untuk INA226 (V/I), MLX90614 (Suhu Laser), MCP4725 (DAC) |
+| **PB6** | `I2C SCL` | Jalur Clock untuk INA226 (V/I), MLX90614 (Suhu Laser), MCP4725 (DAC) |
 
 ---
 

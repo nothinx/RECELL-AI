@@ -34,10 +34,10 @@
 // --------------------------------------------------------------------------
 //  PINOUT (sesuai CSV "Konfirmasi Pinout Final")
 // --------------------------------------------------------------------------
-const int PIN_A_PUL = PB9;   // Stepper A pulse
-const int PIN_A_DIR = PB0;   // Stepper A direction
-const int PIN_B_PUL = PA8;   // Stepper B pulse
-const int PIN_B_DIR = PA3;   // Stepper B direction
+const int PIN_A_PUL = PA8;   // Stepper A pulse 9
+const int PIN_A_DIR = PA3;   // Stepper A direction 0
+const int PIN_B_PUL = PB9;   // Stepper B pulse 8
+const int PIN_B_DIR = PB0;   // Stepper B direction 3
 
 const int PIN_LIMIT_1 = PB15;  // Limit DRAIN (label CSV)
 const int PIN_LIMIT_2 = PA4;   // Limit SORT  (label CSV)
@@ -50,9 +50,9 @@ const int PIN_EMERGENCY  = PB5;
 // --------------------------------------------------------------------------
 //  PARAMETER
 // --------------------------------------------------------------------------
-const long  DEFAULT_STEPS      = 200;
+const long  DEFAULT_STEPS      = 50;
 const long  PULSE_US           = 400;       // setengah-pulsa (matched RECELL_STM32)
-const long  STEPS_MAX_TO_LIMIT = 5000;      // batas aman
+const long  STEPS_MAX_TO_LIMIT = 25000;      // batas aman
 
 // ==========================================================================
 //  SETUP
@@ -95,9 +95,9 @@ void loop() {
     case '4': moveSteps(PIN_B_PUL, PIN_B_DIR, DEFAULT_STEPS, HIGH, "B", "HIGH"); break;
 
     case '5': moveToLimit(PIN_A_PUL, PIN_A_DIR, PIN_LIMIT_1, LOW,  "A", "LIMIT_1", "LOW");  break;
-    case '6': moveToLimit(PIN_A_PUL, PIN_A_DIR, PIN_LIMIT_1, HIGH, "A", "LIMIT_1", "HIGH"); break;
+    case '6': moveToLimit(PIN_A_PUL, PIN_A_DIR, PIN_LIMIT_1, HIGH, "A", "LIMIT_1", "LOW"); break;
     case '7': moveToLimit(PIN_B_PUL, PIN_B_DIR, PIN_LIMIT_2, LOW,  "B", "LIMIT_2", "LOW");  break;
-    case '8': moveToLimit(PIN_B_PUL, PIN_B_DIR, PIN_LIMIT_2, HIGH, "B", "LIMIT_2", "HIGH"); break;
+    case '8': moveToLimit(PIN_B_PUL, PIN_B_DIR, PIN_LIMIT_2, HIGH, "B", "LIMIT_2", "LOW"); break;
 
     case 'c': case 'C': moveCustom(); break;
     case 's': case 'S': printStatus(); break;

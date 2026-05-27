@@ -9,6 +9,7 @@ import os
 import xgboost as xgb
 import pandas as pd
 from passport_generator import BatteryPassport
+from data_logger import DataLogger
 
 # Default Configuration
 SERIAL_PORT = '/dev/ttyUSB0'
@@ -16,6 +17,7 @@ BAUD_RATE = 115200
 MODEL_PATH = 'models/recell_yolo_v8n.engine'
 XGB_MODEL_PATH = 'models/weights/soh_xgb_model.json'
 PASSPORT_DIR = 'data/passports'
+LOG_DIR = 'data/logs'
 
 class RecellMaster:
     def __init__(self, simulate=False, mock_ai=False, ui_callbacks=None):
@@ -24,11 +26,15 @@ class RecellMaster:
         self.running = True
         self.ser = None
         self.passport_gen = BatteryPassport(output_dir=PASSPORT_DIR)
-        
+        self.logger = DataLogger(output_dir=LOG_DIR)
+
         self.grade_decision = None
         self.vision_score = 1.0
         self.electrical_data = {"soh": 0, "volt": 0, "curr": 0}
         self.latest_frame = None
+        self.current_battery_id = None
+        self.defects_seen = set()
+        self.measurement_detail = {}
         
         # UI Callbacks
         self.ui_callbacks = ui_callbacks or {}
@@ -101,6 +107,7 @@ class RecellMaster:
             for box in r.boxes:
                 cls_id = int(box.cls[0])
                 label = self.model.names[cls_id]
+                self.defects_seen.add(label)
                 if label in ['leaking', 'major_dent']: score = 0.0
                 elif label == 'rust': score -= 0.3
                 elif label == 'dent': score -= 0.2
@@ -127,25 +134,48 @@ class RecellMaster:
                         v = data.get("volt", 0)
                         i = data.get("curr", 0.001)
                         t_delta = float(data.get("temp_delta", 1.0))
-                        
+                        v_resting = float(data.get("v_resting", 4.2))
+                        temp_pre = float(data.get("temp_pre", 25.0))
+                        temp_post = float(data.get("temp_post", temp_pre + t_delta))
+
                         self.electrical_data["volt"] = v
                         self.electrical_data["curr"] = i
-                        
+
+                        v_drop = v_resting - v
+                        safe_i = i if i > 0 else 0.001
+                        internal_r = v_drop / safe_i
+
                         if self.has_xgb:
-                            v_drop = 4.2 - v
-                            # Prevent ZeroDivisionError if i is exactly 0
-                            safe_i = i if i > 0 else 0.001
-                            internal_r = v_drop / safe_i
-                            temp_delta = t_delta 
-                            features = pd.DataFrame([[v_drop, internal_r, temp_delta]], columns=['v_drop', 'internal_r', 'temp_delta'])
+                            features = pd.DataFrame([[v_drop, internal_r, t_delta]], columns=['v_drop', 'internal_r', 'temp_delta'])
                             pred_soh = self.xgb_model.predict(features)[0]
                             self.electrical_data["soh"] = max(0, min(100, float(pred_soh)))
                         else:
                             self.electrical_data["soh"] = 85.0 if v > 3.6 else 40.0
-                            
+
+                        self.measurement_detail = {
+                            "v_resting": v_resting,
+                            "v_loaded": v,
+                            "v_drop": v_drop,
+                            "current_load": i,
+                            "internal_r": internal_r,
+                            "temp_pre": temp_pre,
+                            "temp_post": temp_post,
+                            "temp_delta": t_delta,
+                        }
+
                         self.trigger_telemetry_update()
                         self.wait_flag = False
-                        
+
+                    elif data.get("status") == "DISCHARGE_SAMPLE":
+                        if self.current_battery_id:
+                            self.logger.log_discharge_sample(
+                                self.current_battery_id,
+                                data.get("t_ms", 0),
+                                data.get("volt", 0),
+                                data.get("curr", 0),
+                                data.get("temp", 0),
+                            )
+
                     elif data.get("status") in ["AT_PROX_1", "AT_PROX_2", "EJECTED_A", "DROPPED_B"]:
                         self.wait_flag = False
                         
@@ -160,13 +190,55 @@ class RecellMaster:
         if self.simulate:
             self.log_msg(f"[Simulate-TX] {payload.strip()}")
             if cmd == "APPLY_SENSOR_AND_MEASURE":
-                self.electrical_data["volt"] = 3.8
-                self.electrical_data["curr"] = 1.2
-                self.electrical_data["soh"] = 88.5
-                self.trigger_telemetry_update()
-            self.wait_flag = False 
+                self._simulate_measurement()
+            self.wait_flag = False
         else:
             if self.ser: self.ser.write(payload.encode())
+
+    def _simulate_measurement(self):
+        """Produce a realistic measurement and a short discharge curve in --sim mode."""
+        import random
+        soh_true = random.choice([random.uniform(82, 98), random.uniform(60, 80), random.uniform(30, 55)])
+        v_resting = 4.2 - (100 - soh_true) * 0.004 + random.uniform(-0.02, 0.02)
+        internal_r = 0.05 + (100 - soh_true) * 0.004 + random.uniform(-0.01, 0.01)
+        current_load = 1.0
+        v_loaded = v_resting - internal_r * current_load
+        v_drop = v_resting - v_loaded
+        temp_pre = 25.0 + random.uniform(-1, 1)
+        temp_delta = 0.5 + (100 - soh_true) * 0.05 + random.uniform(-0.2, 0.2)
+        temp_post = temp_pre + temp_delta
+
+        # Log a 2-second discharge curve at 20 ms resolution
+        if self.current_battery_id:
+            samples = []
+            for t_ms in range(0, 2001, 20):
+                # Exponential settle to v_loaded
+                v_t = v_resting - v_drop * (1 - 2.718 ** (-t_ms / 200.0))
+                temp_t = temp_pre + temp_delta * (t_ms / 2000.0)
+                samples.append((t_ms, round(v_t, 4), current_load, round(temp_t, 2)))
+            self.logger.log_discharge_batch(self.current_battery_id, samples)
+
+        self.electrical_data["volt"] = v_loaded
+        self.electrical_data["curr"] = current_load
+        self.measurement_detail = {
+            "v_resting": v_resting,
+            "v_loaded": v_loaded,
+            "v_drop": v_drop,
+            "current_load": current_load,
+            "internal_r": internal_r,
+            "temp_pre": temp_pre,
+            "temp_post": temp_post,
+            "temp_delta": temp_delta,
+        }
+
+        if self.has_xgb:
+            features = pd.DataFrame([[v_drop, internal_r, temp_delta]], columns=['v_drop', 'internal_r', 'temp_delta'])
+            pred_soh = float(self.xgb_model.predict(features)[0])
+            self.electrical_data["soh"] = max(0, min(100, pred_soh))
+        else:
+            self.electrical_data["soh"] = soh_true + random.uniform(-3, 3)
+
+        self.trigger_telemetry_update()
 
     def calculate_final_grade(self):
         soh = self.electrical_data.get("soh", 0)
@@ -174,9 +246,13 @@ class RecellMaster:
         elif self.vision_score > 0.8 and soh > 80: return "A"
         else: return "B"
 
-    def run_automated_cycle(self):
+    def run_automated_cycle(self, ground_truth=None):
         self.log_msg("--- Starting Full Automated Cycle ---")
-        battery_id = f"BAT_{int(time.time())}"
+        cycle_start = time.time()
+        battery_id = f"BAT_{int(cycle_start)}"
+        self.current_battery_id = battery_id
+        self.defects_seen = set()
+        self.measurement_detail = {}
         img_path = f"data/{battery_id}.jpg"
         
         self.log_msg("[1] Evaluating Vision...")
@@ -206,6 +282,28 @@ class RecellMaster:
             soh=self.electrical_data['soh'], image_path=img_path
         )
         self.log_msg(f"[5] Battery Passport Generated: {pdf_path}")
+
+        cycle_time = round(time.time() - cycle_start, 2)
+        m = self.measurement_detail
+        self.logger.log_grading(
+            battery_id=battery_id,
+            cycle_time_s=cycle_time,
+            v_resting=round(m.get("v_resting", 0), 4),
+            v_loaded=round(m.get("v_loaded", self.electrical_data["volt"]), 4),
+            v_drop=round(m.get("v_drop", 0), 4),
+            current_load=round(m.get("current_load", self.electrical_data["curr"]), 4),
+            internal_r=round(m.get("internal_r", 0), 4),
+            temp_pre=round(m.get("temp_pre", 0), 2),
+            temp_post=round(m.get("temp_post", 0), 2),
+            temp_delta=round(m.get("temp_delta", 0), 2),
+            soh_predicted=round(self.electrical_data["soh"], 2),
+            vision_score=round(self.vision_score, 3),
+            defects_detected=";".join(sorted(self.defects_seen)) or "none",
+            grade_predicted=self.grade_decision,
+            grade_ground_truth=ground_truth or "",
+            passport_pdf=pdf_path,
+        )
+        self.log_msg(f"[Log] Grading row appended to {self.logger.grading_path}")
 
         if self.grade_decision == "A":
             self.log_msg("[6] Routing to Grade A Bin (PROX 2)...")

@@ -21,3 +21,10 @@ venv/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Runtime data (passports + logs + cycle images)
+jetson/data/
+data/
+
+# Build/runtime caches
+*.engine

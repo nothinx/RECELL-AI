@@ -56,6 +56,14 @@ SystemState currentState = STATE_IDLE;
 int conveyorSpeed = 100; // Kecepatan BTS7960 (0-255)
 bool i2cReady = false;
 
+// --- PARAMETER PENGUKURAN SoH ---
+// Selama beban DAC aktif, ambil DISCHARGE_SAMPLES sampel berjarak
+// DISCHARGE_PERIOD_MS -> total ~2 detik. Tiap sampel di-stream ke Jetson
+// sebagai DISCHARGE_SAMPLE (untuk live discharge curve) lalu dirata-rata
+// jadi nilai v_load/i_load akhir.
+const int DISCHARGE_SAMPLES   = 40;   // 40 x 50ms = ~2000ms beban
+const int DISCHARGE_PERIOD_MS = 50;
+
 void setup() {
   Serial.begin(115200); 
   
@@ -155,43 +163,46 @@ void processCommand(String jsonStr) {
   }
   else if (cmd == "APPLY_SENSOR_AND_MEASURE") {
     // 1. Dorong Sensor (Drain Station Stepper)
-    moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_STP_DRAIN_EN, PIN_LIMIT_DRAIN, HIGH); 
-    
-    // Baca suhu baterai awal via sensor laser (MLX90614)
-    float initialTemp = mlx.readObjectTempC();
-    
-    // 2. Pengukuran SoH via I2C Sensor
+    moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_STP_DRAIN_EN, PIN_LIMIT_DRAIN, HIGH);
+
+    // Suhu awal + tegangan OPEN-CIRCUIT (sebelum beban). v_resting WAJIB diukur
+    // di sini supaya Jetson bisa hitung v_drop = v_resting - v_load (basis SoH).
+    float tempPre  = mlx.readObjectTempC();
+    float vResting = i2cReady ? ina226.getBusVoltage_V() : 4.2;
+
+    // 2. Nyalakan beban DAC, lalu sampling + STREAM discharge curve selama ~2s.
     digitalWrite(PIN_DAC_EN, HIGH); // Nyalakan Enable DAC
-    dac.setVoltage(4095, false); // Berikan tegangan/beban maksimal via DAC I2C
-    delay(2000); // Tahan beban untuk melihat Voltage Drop
-    
+    dac.setVoltage(4095, false);    // Beban maksimal via DAC I2C
+
     float v = 0.0, i = 0.0;
-    if (i2cReady) {
-      // Ambil 10 sampel untuk filter noise
-      float sumV = 0, sumI = 0;
-      for(int j=0; j<10; j++) {
-        sumV += ina226.getBusVoltage_V();
-        sumI += ina226.getCurrent_mA() / 1000.0;
-        delay(10);
+    float sumV = 0, sumI = 0;
+    for (int j = 0; j < DISCHARGE_SAMPLES; j++) {
+      float vt, it, tt;
+      if (i2cReady) {
+        vt = ina226.getBusVoltage_V();
+        it = ina226.getCurrent_mA() / 1000.0;
+        tt = mlx.readObjectTempC();
+      } else {
+        // Dummy bila modul I2C belum terpasang -- pipeline tetap jalan
+        vt = 3.75; it = 1.50; tt = tempPre;
       }
-      v = sumV / 10.0;
-      i = sumI / 10.0;
-    } else {
-      // Dummy values jika modul I2C belum terpasang
-      v = 3.75;
-      i = 1.50;
+      sumV += vt; sumI += it;
+      sendDischargeSample((unsigned long)j * DISCHARGE_PERIOD_MS, vt, it, tt);
+      delay(DISCHARGE_PERIOD_MS);
     }
-    
-    float finalTemp = mlx.readObjectTempC();
-    float tempDelta = finalTemp - initialTemp;
-    
-    dac.setVoltage(0, false); // Matikan Load DAC
-    digitalWrite(PIN_DAC_EN, LOW); // Matikan Enable DAC
-    
+    v = sumV / DISCHARGE_SAMPLES;
+    i = sumI / DISCHARGE_SAMPLES;
+
+    float tempPost  = mlx.readObjectTempC();
+    float tempDelta = tempPost - tempPre;
+
+    dac.setVoltage(0, false);       // Matikan Load DAC
+    digitalWrite(PIN_DAC_EN, LOW);  // Matikan Enable DAC
+
     // 3. Tarik Sensor mundur (asumsi butuh mundur 1000 step)
     moveStepper(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_STP_DRAIN_EN, 1000, LOW);
-    
-    sendTelemetryExt(v, i, tempDelta, "MEASUREMENT_DONE");
+
+    sendMeasurement(vResting, v, i, tempPre, tempPost, tempDelta, "MEASUREMENT_DONE");
   }
   else if (cmd == "MOVE_TO_PROX_2") {
     startConveyorForward();
@@ -262,10 +273,39 @@ void sendTelemetry(float v, float i, const char* status) {
 
 void sendTelemetryExt(float v, float i, float tempDelta, const char* status) {
   StaticJsonDocument<200> doc;
-  doc["volt"] = serialized(String(v, 3)); 
+  doc["volt"] = serialized(String(v, 3));
   doc["curr"] = serialized(String(i, 3));
   doc["temp_delta"] = serialized(String(tempDelta, 2));
   doc["status"] = status;
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+// Hasil pengukuran lengkap -> dipakai Jetson untuk hitung v_drop, internal_R,
+// dan fitur SoH (XGBoost). Field harus cocok dgn parser di main.py.
+void sendMeasurement(float vResting, float v, float i,
+                     float tempPre, float tempPost, float tempDelta,
+                     const char* status) {
+  StaticJsonDocument<256> doc;
+  doc["volt"]       = serialized(String(v, 3));
+  doc["curr"]       = serialized(String(i, 3));
+  doc["v_resting"]  = serialized(String(vResting, 3));
+  doc["temp_pre"]   = serialized(String(tempPre, 2));
+  doc["temp_post"]  = serialized(String(tempPost, 2));
+  doc["temp_delta"] = serialized(String(tempDelta, 2));
+  doc["status"]     = status;
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+// Satu titik kurva discharge (di-stream tiap sampel selama beban aktif).
+void sendDischargeSample(unsigned long t_ms, float v, float i, float temp) {
+  StaticJsonDocument<160> doc;
+  doc["status"] = "DISCHARGE_SAMPLE";
+  doc["t_ms"]   = t_ms;
+  doc["volt"]   = serialized(String(v, 4));
+  doc["curr"]   = serialized(String(i, 4));
+  doc["temp"]   = serialized(String(temp, 2));
   serializeJson(doc, Serial);
   Serial.println();
 }

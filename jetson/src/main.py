@@ -299,6 +299,14 @@ class RecellMaster:
                     elif data.get("status") in ["AT_PROX_1", "AT_PROX_2", "EJECTED_A", "DROPPED_B"]:
                         self.wait_flag = False
 
+                    elif data.get("status") == "EMERGENCY_STOP":
+                        # Hardware E-stop on the STM32. Abort the running cycle
+                        # and release any wait so run_automated_cycle() doesn't
+                        # hang forever waiting on a step that will never finish.
+                        self.log_msg("[STM32] HARDWARE EMERGENCY STOP — aborting cycle.")
+                        self.abort_cycle = True
+                        self.wait_flag = False
+
                 except Exception:
                     pass
             time.sleep(0.01)

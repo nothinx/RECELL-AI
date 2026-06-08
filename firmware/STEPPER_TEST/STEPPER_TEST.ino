@@ -51,11 +51,15 @@ const int PIN_EMERGENCY  = PB5;
 //  PARAMETER
 // --------------------------------------------------------------------------
 const long  DEFAULT_STEPS      = 50;
-const long  PULSE_US           = 400;       // setengah-pulsa (matched RECELL_STM32)
-const long  STEPS_MAX_TO_LIMIT = 25000;      // batas aman
+long        PULSE_US           = 150;       // setengah-pulsa (us). VARIABEL: atur live via +/-
+const long  PULSE_US_MIN       = 40;        // batas tercepat (hati2 stall)
+const long  PULSE_US_MAX       = 800;       // batas terpelan
+const long  PULSE_US_STEP      = 20;        // perubahan per tekan +/-
+const long  STEPS_MAX_TO_LIMIT = 25000;     // batas aman (1 leg maju-mundur)
+const int   REARM_CLEAR_STEPS  = 40;        // HIGH stabil sekian step -> baru "armed" lagi (debounce lepas)
 
 // ==========================================================================
-//  SETUP
+//  SETUPu
 // ==========================================================================
 void setup() {
   Serial.begin(115200);
@@ -98,6 +102,12 @@ void loop() {
     case '6': moveToLimit(PIN_A_PUL, PIN_A_DIR, PIN_LIMIT_1, HIGH, "A", "LIMIT_1", "LOW"); break;
     case '7': moveToLimit(PIN_B_PUL, PIN_B_DIR, PIN_LIMIT_2, LOW,  "B", "LIMIT_2", "LOW");  break;
     case '8': moveToLimit(PIN_B_PUL, PIN_B_DIR, PIN_LIMIT_2, HIGH, "B", "LIMIT_2", "LOW"); break;
+
+    case '9': oscillate(PIN_A_PUL, PIN_A_DIR, PIN_LIMIT_1, LOW, "A", "LIMIT_1 (PB15)"); break;
+    case 'm': case 'M': oscillate(PIN_B_PUL, PIN_B_DIR, PIN_LIMIT_2, LOW, "B", "LIMIT_2 (PA4)"); break;
+
+    case '+': case '=': changeSpeed(-PULSE_US_STEP); break;  // pulse lebih kecil = lebih CEPAT
+    case '-': case '_': changeSpeed(+PULSE_US_STEP); break;  // pulse lebih besar = lebih PELAN
 
     case 'c': case 'C': moveCustom(); break;
     case 's': case 'S': printStatus(); break;
@@ -181,6 +191,90 @@ void moveToLimit(int pulPin, int dirPin, int limitPin, int dir,
   else        { Serial.println(F("  [!] Maksimum tercapai TANPA kena limit -- cek wiring/limit polarity.")); }
 }
 
+// --------------------------------------------------------------------------
+//  MAJU-MUNDUR KONTINU (2 limit switch paralel di 1 pin)
+// --------------------------------------------------------------------------
+//  Konfigurasi fisik: 1 limit di ujung kiri + 1 di ujung kanan, KEDUANYA
+//  diparalel ke SATU pin (active LOW). MCU hanya tahu "ada limit kena",
+//  tidak tahu ujung mana. Maka pakai: deteksi tepi + latch "armed" + toggle
+//  arah tiap kena.
+//
+//  armed=true  : pin HIGH (motor di tengah lintasan, siap deteksi limit)
+//  armed=false : barusan kena limit; switch masih ketekan (LOW) saat motor
+//                mulai menjauh -> LOW ini DIABAIKAN sampai switch lepas.
+// --------------------------------------------------------------------------
+inline void stepOnce(int pulPin) {
+  digitalWrite(pulPin, HIGH); delayMicroseconds(PULSE_US);
+  digitalWrite(pulPin, LOW);  delayMicroseconds(PULSE_US);
+}
+
+void oscillate(int pulPin, int dirPin, int limitPin, int startDir,
+               const char* name, const char* limitLabel) {
+  Serial.println();
+  Serial.print(F("[OSCILLATE ")); Serial.print(name);
+  Serial.print(F("] maju-mundur antara 2 limit @ ")); Serial.println(limitLabel);
+  Serial.print(F("  PULSE_US=")); Serial.print(PULSE_US);
+  Serial.print(F("us, re-arm butuh ")); Serial.print(REARM_CLEAR_STEPS);
+  Serial.println(F(" step HIGH stabil (anti-bounce)"));
+  Serial.println(F("  Tiap kena limit -> stop -> balik arah. Loop terus."));
+  Serial.println(F("  (ENTER atau EMERGENCY untuk stop)"));
+
+  int  dir        = startDir;
+  long bounces    = 0;   // berapa kali kena limit (balik arah)
+  long stepsLeg   = 0;   // langkah sejak balik arah terakhir
+  int  clearCount = 0;   // berapa step beruntun pin HIGH (untuk re-arm)
+  // armed hanya jika pin sudah HIGH stabil; saat start pun harus diverifikasi
+  bool armed      = false;
+  const char* reason = nullptr;
+
+  digitalWrite(dirPin, dir);
+  delayMicroseconds(20);
+  if (digitalRead(limitPin) == LOW)
+    Serial.println(F("  (Info: limit tertekan saat start -> menjauh dulu, belum di-arm)"));
+
+  flushSerial();
+  while (true) {
+    reason = abortReason();
+    if (reason) break;
+
+    stepOnce(pulPin);
+    stepsLeg++;
+
+    if (digitalRead(limitPin) == HIGH) {
+      // lepas: hitung HIGH beruntun, arm hanya setelah stabil (debounce bounce)
+      if (clearCount < REARM_CLEAR_STEPS) clearCount++;
+      if (clearCount >= REARM_CLEAR_STEPS) armed = true;
+    } else {
+      // LOW: pin sedang ketekan. bounce HIGH->LOW mereset hitungan re-arm.
+      clearCount = 0;
+      if (armed) {
+        // hanya di sini = benar2 nabrak ujung (sudah pernah lepas stabil)
+        bounces++;
+        Serial.print(F("  [LIMIT] kena #")); Serial.print(bounces);
+        Serial.print(F(" setelah ")); Serial.print(stepsLeg);
+        Serial.print(F(" step (DIR="));
+        Serial.print(dir == LOW ? F("LOW") : F("HIGH"));
+        Serial.println(F(") -> balik arah"));
+
+        dir = (dir == LOW) ? HIGH : LOW;   // balik arah
+        digitalWrite(dirPin, dir);
+        delayMicroseconds(20);
+        armed    = false;                  // belum boleh deteksi limit lagi...
+        stepsLeg = 0;                      // ...sampai HIGH stabil lagi (clearCount)
+      }
+    }
+
+    // pengaman: 1 leg kelewat panjang tanpa kena limit -> berhenti
+    if (stepsLeg > STEPS_MAX_TO_LIMIT) {
+      reason = "MAX STEP 1 LEG TANPA LIMIT -- cek wiring/limit polarity";
+      break;
+    }
+  }
+
+  Serial.print(F("  Selesai. Total balik-arah: ")); Serial.println(bounces);
+  if (reason) { Serial.print(F("  Dihentikan: ")); Serial.println(reason); }
+}
+
 // Custom: user pilih stepper, dir, dan jumlah step
 void moveCustom() {
   Serial.println();
@@ -222,6 +316,19 @@ String readBlocking() {
 
 void flushSerial() { while (Serial.available()) Serial.read(); }
 
+void changeSpeed(long delta) {
+  PULSE_US += delta;
+  if (PULSE_US < PULSE_US_MIN) PULSE_US = PULSE_US_MIN;
+  if (PULSE_US > PULSE_US_MAX) PULSE_US = PULSE_US_MAX;
+  Serial.print(F("  >> PULSE_US = ")); Serial.print(PULSE_US);
+  Serial.print(F(" us/half  (~"));
+  Serial.print(1000000L / (2 * PULSE_US));   // langkah per detik
+  Serial.print(F(" step/s)"));
+  if (PULSE_US == PULSE_US_MIN) Serial.print(F("  [MAX CEPAT]"));
+  if (PULSE_US == PULSE_US_MAX) Serial.print(F("  [MAX PELAN]"));
+  Serial.println();
+}
+
 const char* abortReason() {
   if (digitalRead(PIN_EMERGENCY) == LOW) return "EMERGENCY DITEKAN";
   if (Serial.available()) { flushSerial(); return "DIBATALKAN (ENTER)"; }
@@ -250,11 +357,15 @@ void printMenu() {
   Serial.println(F(" 6. Stepper A -> LIMIT 1 (PB15), DIR=HIGH"));
   Serial.println(F(" 7. Stepper B -> LIMIT 2 (PA4),  DIR=LOW"));
   Serial.println(F(" 8. Stepper B -> LIMIT 2 (PA4),  DIR=HIGH"));
+  Serial.println(F(" 9. Stepper A MAJU-MUNDUR kontinu (2 limit @ PB15)"));
+  Serial.println(F(" m. Stepper B MAJU-MUNDUR kontinu (2 limit @ PA4)"));
+  Serial.println(F(" +. Lebih CEPAT   -. Lebih PELAN  (atur live)"));
   Serial.println(F(" c. Custom (pilih stepper / dir / step)"));
   Serial.println(F(" s. Status sensor (limit, IR, emergency)"));
   Serial.println(F(" h. Tampilkan menu ini lagi"));
   Serial.println(F("---------------------------------------------"));
-  Serial.print(F("Pilihan > "));
+  Serial.print(F("Speed PULSE_US=")); Serial.print(PULSE_US);
+  Serial.print(F("us | Pilihan > "));
 }
 
 void printStatus() {

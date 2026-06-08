@@ -64,6 +64,19 @@ bool i2cReady = false;
 const int DISCHARGE_SAMPLES   = 40;   // 40 x 50ms = ~2000ms beban
 const int DISCHARGE_PERIOD_MS = 50;
 
+// --- PARAMETER STEPPER ---
+// Semua gerakan stepper SAMPAI LIMIT SWITCH (bukan step tetap). Tiap stepper
+// punya 2 limit (ujung maju + home) diparalel di 1 pin. Logika robust: kalau
+// start MENEMPEL limit (kasus mundur/home), carriage jalan dulu sampai limit
+// LEPAS stabil STEPPER_REARM_STEPS step (anti-bounce) -> baru boleh berhenti
+// saat limit lawan KENA (dikonfirmasi anti-noise). STEPPER_MAX_STEPS = pengaman
+// supaya stepper tidak jalan tak terbatas bila limit gagal.
+const int  STEPPER_PULSE_US      = 400;   // setengah-pulsa (us)
+const long STEPPER_MAX_STEPS     = 25000; // ceiling pengaman 1 leg
+const int  STEPPER_REARM_STEPS   = 40;    // limit harus LEPAS stabil sekian step
+const int  LIMIT_CONFIRM_SAMPLES = 4;     // sampel LOW beruntun utk konfirmasi
+const int  LIMIT_CONFIRM_US      = 200;   // jeda antar sampel konfirmasi
+
 void setup() {
   Serial.begin(115200); 
   
@@ -199,8 +212,9 @@ void processCommand(String jsonStr) {
     dac.setVoltage(0, false);       // Matikan Load DAC
     digitalWrite(PIN_DAC_EN, LOW);  // Matikan Enable DAC
 
-    // 3. Tarik Sensor mundur (asumsi butuh mundur 1000 step)
-    moveStepper(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_STP_DRAIN_EN, 1000, LOW);
+    // 3. Tarik Sensor mundur SAMPAI limit home (bukan step tetap) -> posisi
+    //    home selalu konsisten, tidak drift tiap siklus.
+    moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_STP_DRAIN_EN, PIN_LIMIT_DRAIN, LOW);
 
     sendMeasurement(vResting, v, i, tempPre, tempPost, tempDelta, "MEASUREMENT_DONE");
   }
@@ -209,8 +223,10 @@ void processCommand(String jsonStr) {
     currentState = STATE_WAIT_PROX_2;
   }
   else if (cmd == "EJECT_A") {
+    // Dorong ejector ke limit depan, lalu mundur SAMPAI limit home (bukan 2500
+    // step tetap) -> ejector selalu balik tepat ke home, tidak drift.
     moveStepperUntilLimit(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_STP_SORT_EN, PIN_LIMIT_SORTING, HIGH);
-    moveStepper(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_STP_SORT_EN, 2500, LOW); // Mundur Ejector
+    moveStepperUntilLimit(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_STP_SORT_EN, PIN_LIMIT_SORTING, LOW);
     sendTelemetry(0, 0, "EJECTED_A");
   }
   else if (cmd == "MOVE_TO_END") {
@@ -239,32 +255,47 @@ void stopConveyor() {
 }
 
 // --- FUNGSI HELPER STEPPER ---
-void moveStepper(int pinStep, int pinDir, int pinEn, int steps, int dir) {
-  digitalWrite(pinEn, LOW); // Enable Stepper Driver (Active Low biasanya)
-  digitalWrite(pinDir, dir);
-  for(int i=0; i<steps; i++) {
-    digitalWrite(pinStep, HIGH);
-    delayMicroseconds(400); 
-    digitalWrite(pinStep, LOW);
-    delayMicroseconds(400);
+// Konfirmasi limit benar-benar LOW (debounce anti-noise/glitch).
+bool limitConfirmed(int pinLimit) {
+  for (int k = 0; k < LIMIT_CONFIRM_SAMPLES; k++) {
+    delayMicroseconds(LIMIT_CONFIRM_US);
+    if (digitalRead(pinLimit) != LOW) return false;
   }
-  digitalWrite(pinEn, HIGH); // Disable Stepper
+  return true;
 }
 
+// Gerakkan stepper ke arah 'dir' SAMPAI limit switch kena (bukan step tetap).
+// Robust untuk start menempel limit (kasus mundur/home): kalau limit sudah LOW
+// saat mulai, carriage jalan dulu sampai limit LEPAS (HIGH) stabil
+// STEPPER_REARM_STEPS step -> baru "armed", lalu berhenti saat limit lawan KENA
+// (LOW terkonfirmasi). STEPPER_MAX_STEPS jadi pengaman bila limit gagal.
+// SENYAP: tidak menulis ke Serial (Serial = kanal JSON ke Jetson).
 void moveStepperUntilLimit(int pinStep, int pinDir, int pinEn, int pinLimit, int dir) {
-  digitalWrite(pinEn, LOW); 
+  digitalWrite(pinEn, LOW);   // Enable driver (active LOW)
   digitalWrite(pinDir, dir);
-  
-  // Maju maksimal 5000 step atau sampai limit switch tersentuh
-  for(int i=0; i<5000; i++) {
-    if (digitalRead(pinLimit) == LOW) break; // Asumsi Limit Switch Active Low
-    
-    digitalWrite(pinStep, HIGH);
-    delayMicroseconds(400); 
-    digitalWrite(pinStep, LOW);
-    delayMicroseconds(400);
+  delayMicroseconds(20);      // settle arah
+
+  bool startFree = (digitalRead(pinLimit) == HIGH);
+  bool armed     = startFree;                          // start bebas -> langsung siap
+  int  clearCnt  = startFree ? STEPPER_REARM_STEPS : 0;
+
+  for (long i = 0; i < STEPPER_MAX_STEPS; i++) {
+    if (digitalRead(PIN_EMERGENCY) == LOW) break;     // abort bila emergency
+
+    if (digitalRead(pinLimit) == HIGH) {
+      // limit lepas -- butuh stabil dulu baru dianggap benar-benar lepas
+      if (clearCnt < STEPPER_REARM_STEPS) clearCnt++;
+      if (clearCnt >= STEPPER_REARM_STEPS) armed = true;
+    } else {
+      // LOW: reset hitungan lepas; berhenti hanya kalau sudah armed + terkonfirmasi
+      clearCnt = 0;
+      if (armed && limitConfirmed(pinLimit)) break;
+    }
+
+    digitalWrite(pinStep, HIGH); delayMicroseconds(STEPPER_PULSE_US);
+    digitalWrite(pinStep, LOW);  delayMicroseconds(STEPPER_PULSE_US);
   }
-  digitalWrite(pinEn, HIGH);
+  digitalWrite(pinEn, HIGH);  // Disable driver
 }
 
 void sendTelemetry(float v, float i, const char* status) {

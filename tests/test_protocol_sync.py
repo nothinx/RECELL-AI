@@ -21,11 +21,11 @@ COMMANDS = [
 # Status yang dipancarkan firmware (semua), dan subset yang ditindaklanjuti Jetson.
 STATUSES_EMITTED = [
     "BOOT_OK", "AT_PROX_1", "AT_PROX_2", "DISCHARGE_SAMPLE", "MEASUREMENT_DONE",
-    "EJECTED_A", "DROPPED_B", "STOPPED", "RESET_OK", "EMERGENCY_STOP",
+    "EJECTED_A", "DROPPED_B", "STOPPED", "RESET_OK", "EMERGENCY_STOP", "STEP_TIMEOUT",
 ]
 STATUSES_CONSUMED = [
     "MEASUREMENT_DONE", "DISCHARGE_SAMPLE", "AT_PROX_1", "AT_PROX_2",
-    "EJECTED_A", "DROPPED_B", "EMERGENCY_STOP",
+    "EJECTED_A", "DROPPED_B", "EMERGENCY_STOP", "STEP_TIMEOUT",
 ]
 MEASUREMENT_FIELDS = ["volt", "curr", "v_resting", "temp_pre", "temp_post", "temp_delta"]
 DISCHARGE_FIELDS = ["t_ms", "volt", "curr", "temp"]

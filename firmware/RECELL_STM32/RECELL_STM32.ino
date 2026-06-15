@@ -57,6 +57,8 @@ const int  DISCHARGE_SAMPLES     = 40;    // 40 x 50ms = ~2000ms beban
 const int  DISCHARGE_PERIOD_MS   = 50;
 const uint16_t DAC_LOAD_VALUE    = 4095;  // beban maksimal
 const unsigned long END_OF_LINE_MS = 5000;
+const unsigned long STEPPER_TIMEOUT_MS = 10000; // stall guard: limit tak kunjung kena
+const unsigned long PROX_TIMEOUT_MS    = 25000; // guard: IR tak terdeteksi (baterai nyangkut)
 
 // Arah DIR: LOW = maju ke limit, HIGH = mundur ke home.
 const int DIR_FORWARD = LOW;
@@ -64,6 +66,7 @@ const int DIR_HOME    = HIGH;
 
 enum SystemState { STATE_IDLE, STATE_WAIT_PROX_1, STATE_WAIT_PROX_2, STATE_EMERGENCY };
 SystemState currentState = STATE_IDLE;
+unsigned long waitStartMs = 0; // kapan masuk STATE_WAIT_PROX_* (untuk timeout)
 
 bool inaReady = false, mlxReady = false, dacReady = false;
 
@@ -121,15 +124,27 @@ void loop() {
     processCommand(incomingStr);
   }
 
-  if (currentState == STATE_WAIT_PROX_1 && digitalRead(PIN_IR_DRAIN) == LOW) {
-    stopConveyor();
-    currentState = STATE_IDLE;
-    sendTelemetry(0, 0, "AT_PROX_1");
+  if (currentState == STATE_WAIT_PROX_1) {
+    if (digitalRead(PIN_IR_DRAIN) == LOW) {
+      stopConveyor();
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "AT_PROX_1");
+    } else if (millis() - waitStartMs > PROX_TIMEOUT_MS) {
+      stopConveyor();
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "STEP_TIMEOUT");
+    }
   }
-  if (currentState == STATE_WAIT_PROX_2 && digitalRead(PIN_IR_SORTING) == LOW) {
-    stopConveyor();
-    currentState = STATE_IDLE;
-    sendTelemetry(0, 0, "AT_PROX_2");
+  if (currentState == STATE_WAIT_PROX_2) {
+    if (digitalRead(PIN_IR_SORTING) == LOW) {
+      stopConveyor();
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "AT_PROX_2");
+    } else if (millis() - waitStartMs > PROX_TIMEOUT_MS) {
+      stopConveyor();
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "STEP_TIMEOUT");
+    }
   }
 }
 
@@ -162,6 +177,7 @@ void processCommand(String jsonStr) {
   }
   else if (cmd == "MOVE_TO_PROX_1") {
     startConveyorForward();
+    waitStartMs = millis();
     currentState = STATE_WAIT_PROX_1;
   }
   else if (cmd == "APPLY_SENSOR_AND_MEASURE") {
@@ -169,12 +185,13 @@ void processCommand(String jsonStr) {
   }
   else if (cmd == "MOVE_TO_PROX_2") {
     startConveyorForward();
+    waitStartMs = millis();
     currentState = STATE_WAIT_PROX_2;
   }
   else if (cmd == "EJECT_A") {
-    moveStepperUntilLimit(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_LIMIT_SORTING, DIR_FORWARD);
-    moveStepperUntilLimit(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_LIMIT_SORTING, DIR_HOME);
-    if (currentState != STATE_EMERGENCY) sendTelemetry(0, 0, "EJECTED_A");
+    if (!moveStepperUntilLimit(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_LIMIT_SORTING, DIR_FORWARD)) return;
+    if (!moveStepperUntilLimit(PIN_STP_SORT_PUL, PIN_STP_SORT_DIR, PIN_LIMIT_SORTING, DIR_HOME)) return;
+    sendTelemetry(0, 0, "EJECTED_A");
   }
   else if (cmd == "MOVE_TO_END") {
     startConveyorForward();
@@ -197,8 +214,7 @@ void processCommand(String jsonStr) {
 // --- Pengukuran SoH: push -> beban+stream discharge -> retract -------------
 void runMeasurement() {
   // 1. Dorong sensor ke limit drain.
-  moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_LIMIT_DRAIN, DIR_FORWARD);
-  if (currentState == STATE_EMERGENCY) return;
+  if (!moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_LIMIT_DRAIN, DIR_FORWARD)) return;
 
   // 2. Baseline open-circuit (basis v_drop/internal_R di Jetson).
   float tempPre  = mlxReady ? mlx.readObjectTempC() : 25.0;
@@ -231,8 +247,7 @@ void runMeasurement() {
   safeShutdownLoad();
 
   // 4. Tarik sensor mundur ke home (konsisten, tidak drift).
-  moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_LIMIT_DRAIN, DIR_HOME);
-  if (currentState == STATE_EMERGENCY) return;
+  if (!moveStepperUntilLimit(PIN_STP_DRAIN_PUL, PIN_STP_DRAIN_DIR, PIN_LIMIT_DRAIN, DIR_HOME)) return;
 
   sendMeasurement(vResting, v, i, tempPre, tempPost, tempDelta, "MEASUREMENT_DONE");
 }
@@ -268,24 +283,33 @@ bool limitConfirmed(int pinLimit) {
 // Gerakkan stepper ke arah 'dir' SAMPAI limit kena. Robust untuk start menempel
 // limit: jalan dulu sampai limit LEPAS stabil STEPPER_REARM_STEPS step -> armed,
 // baru berhenti saat limit lawan KENA terkonfirmasi. Tanpa ceiling step. SENYAP.
-// Abort bila E-stop fisik (set STATE_EMERGENCY via emergencyActive()).
-void moveStepperUntilLimit(int pinStep, int pinDir, int pinLimit, int dir) {
+// Return true bila limit tercapai; false bila di-abort: E-stop fisik (STATE_EMERGENCY)
+// ATAU stall-guard STEPPER_TIMEOUT_MS terlampaui -> pancarkan STEP_TIMEOUT, mesin IDLE.
+bool moveStepperUntilLimit(int pinStep, int pinDir, int pinLimit, int dir) {
   digitalWrite(pinDir, dir);
   delayMicroseconds(20);
 
   bool startFree = (digitalRead(pinLimit) == HIGH);
   bool armed     = startFree;
   int  clearCnt  = startFree ? STEPPER_REARM_STEPS : 0;
+  unsigned long t0 = millis();
 
   for (long i = 0; ; i++) {
-    if (emergencyActive()) return;
+    if (emergencyActive()) return false;
+
+    if (millis() - t0 > STEPPER_TIMEOUT_MS) {
+      // Limit tak kunjung kena (motor macet / limit gagal) -> fault lunak.
+      currentState = STATE_IDLE;
+      sendTelemetry(0, 0, "STEP_TIMEOUT");
+      return false;
+    }
 
     if (digitalRead(pinLimit) == HIGH) {
       if (clearCnt < STEPPER_REARM_STEPS) clearCnt++;
       if (clearCnt >= STEPPER_REARM_STEPS) armed = true;
     } else {
       clearCnt = 0;
-      if (armed && limitConfirmed(pinLimit)) return;
+      if (armed && limitConfirmed(pinLimit)) return true;
     }
 
     digitalWrite(pinStep, HIGH); delayMicroseconds(STEPPER_PULSE_US);

@@ -307,6 +307,14 @@ class RecellMaster:
                         self.abort_cycle = True
                         self.wait_flag = False
 
+                    elif data.get("status") == "STEP_TIMEOUT":
+                        # Firmware hit a per-step timeout (jammed battery / failed
+                        # limit switch). Abort the cycle gracefully instead of
+                        # hanging forever on a step that will never complete.
+                        self.log_msg("[STM32] STEP TIMEOUT — firmware aborted a step. Aborting cycle.")
+                        self.abort_cycle = True
+                        self.wait_flag = False
+
                 except Exception:
                     pass
             time.sleep(0.01)
@@ -433,17 +441,13 @@ class RecellMaster:
         self.log_msg("[2] Moving to Sensor Station (PROX 1)...")
         self.wait_flag = True
         self.send_command("MOVE_TO_PROX_1")
-        while self.wait_flag and self.running and not self.abort_cycle:
-            time.sleep(0.1)
-        if self._aborted():
+        if not self._wait_for_step():
             return
 
         self.log_msg("[3] Pushing Sensor and Measuring...")
         self.wait_flag = True
         self.send_command("APPLY_SENSOR_AND_MEASURE")
-        while self.wait_flag and self.running and not self.abort_cycle:
-            time.sleep(0.1)
-        if self._aborted():
+        if not self._wait_for_step():
             return
 
         self.grade_decision = self.calculate_final_grade()
@@ -486,25 +490,19 @@ class RecellMaster:
             self.log_msg("[6] Routing to Grade A Bin (PROX 2)...")
             self.wait_flag = True
             self.send_command("MOVE_TO_PROX_2")
-            while self.wait_flag and self.running and not self.abort_cycle:
-                time.sleep(0.1)
-            if self._aborted():
+            if not self._wait_for_step():
                 return
 
             self.log_msg("[7] Ejecting Grade A...")
             self.wait_flag = True
             self.send_command("EJECT_A")
-            while self.wait_flag and self.running and not self.abort_cycle:
-                time.sleep(0.1)
-            if self._aborted():
+            if not self._wait_for_step():
                 return
         else:
             self.log_msg("[6] Routing to Grade B / Reject Bin (END OF CONVEYOR)...")
             self.wait_flag = True
             self.send_command("MOVE_TO_END")
-            while self.wait_flag and self.running and not self.abort_cycle:
-                time.sleep(0.1)
-            if self._aborted():
+            if not self._wait_for_step():
                 return
 
         self.log_msg("--- Cycle Complete ---")
@@ -514,6 +512,26 @@ class RecellMaster:
             self.log_msg("[ABORT] Cycle aborted by Emergency Stop.")
             return True
         return False
+
+    def _wait_for_step(self, timeout=45.0):
+        """Block until the firmware signals the current step is done (wait_flag
+        cleared), the cycle is aborted, or `timeout` seconds elapse. Returns True
+        if the step completed normally; False if it was aborted or timed out (the
+        caller should stop the cycle).
+
+        Firmware enforces its own per-step timeouts and emits STEP_TIMEOUT; this
+        is a Jetson-side backstop in case that status is ever lost, so a cycle can
+        never hang forever on a step that will not complete."""
+        start = time.time()
+        while self.wait_flag and self.running and not self.abort_cycle:
+            if time.time() - start > timeout:
+                self.log_msg(f"[TIMEOUT] Step exceeded {timeout:.0f}s with no response — aborting cycle.")
+                self.abort_cycle = True
+                self.wait_flag = False
+                self.send_command("STOP_CONVEYOR")
+                return False
+            time.sleep(0.1)
+        return not self._aborted()
 
     def run(self):
         threading.Thread(target=self.vision_thread, daemon=True).start()

@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FW = (ROOT / "firmware" / "RECELL_STM32" / "RECELL_STM32.ino").read_text(encoding="utf-8")
 MAIN = (ROOT / "jetson" / "src" / "main.py").read_text(encoding="utf-8")
+UI = (ROOT / "jetson" / "src" / "ui_dashboard.py").read_text(encoding="utf-8")
+JETSON_TX = MAIN + "\n" + UI  # command sends may live in the controller OR the GUI layer
 
 # --- Kontrak kanonik -------------------------------------------------------
 COMMANDS = [
@@ -36,7 +38,7 @@ def test_every_command_handled_by_firmware():
 
 def test_every_command_sent_by_jetson():
     for c in COMMANDS:
-        assert re.search(rf'send_command\(\s*"{c}"', MAIN), f"main.py tak pernah kirim {c}"
+        assert re.search(rf'send_command\(\s*"{c}"', JETSON_TX), f"Jetson tak pernah kirim {c}"
 
 
 def test_firmware_emits_all_statuses():

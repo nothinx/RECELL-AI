@@ -411,6 +411,12 @@ class RecellMaster:
         # Reset grade so UI shows TESTING state cleanly
         self.grade_decision = None
 
+        # Clear any latched hardware E-stop on the STM32 so a cycle started after
+        # an emergency doesn't hang on a silently-dropped command. Fire-and-forget:
+        # firmware replies RESET_OK (not awaited). If the physical button is still
+        # held, firmware re-enters EMERGENCY immediately.
+        self.send_command("RESET")
+
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         img_path = str(DATA_DIR / f"{battery_id}.jpg")
 

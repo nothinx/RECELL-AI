@@ -231,7 +231,7 @@ class BatteryPassport:
             ("RESTING VOLTAGE · Tegangan Diam",      f"{float(g('v_resting', 0.0)):.3f} V"),
             ("LOADED VOLTAGE · Tegangan Berbeban",   f"{float(g('v_loaded', volt)):.3f} V"),
             ("VOLTAGE DROP · Penurunan Tegangan",    f"{float(g('v_drop', 0.0)):.3f} V"),
-            ("INTERNAL RESISTANCE · Resistansi Int", f"{float(g('internal_r', 0.0)):.4f} Ω"),
+            ("INTERNAL RESISTANCE · Resistansi Int", f"{float(g('internal_r', 0.0)):.4f} Ohm"),
             ("LOAD CURRENT · Arus Beban",            f"{float(g('current_load', curr)):.3f} A"),
             ("TEMP RISE · Kenaikan Suhu",            f"{float(g('temp_delta', 0.0)):.2f} °C"),
             ("VISION SCORE · Skor Visual",           f"{float(vision_score):.2f} / 1.00"),

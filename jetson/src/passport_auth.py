@@ -89,4 +89,10 @@ def load_or_create_key(path):
     key = secrets.token_hex(32)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(key, encoding="utf-8")
+    try:
+        p.chmod(0o600)  # batasi akses (best-effort; diabaikan di Windows)
+    except Exception:
+        pass
+    print(f"[Passport] Kunci penandatangan baru dibuat di {p} "
+          f"— RAHASIA: backup & jangan commit.")
     return key

@@ -1,0 +1,31 @@
+# ============================================================================
+#  RECELL-AI — Dependency RUNTIME untuk Jetson Orin Nano Super
+#  Target: JetPack 6.x (Ubuntu 22.04, aarch64, Python 3.10, CUDA 12.6)
+# ----------------------------------------------------------------------------
+#  Hanya paket yang BENAR-BENAR dipanggil saat mesin grading berjalan
+#  (dikonfirmasi dari import di main.py, ui_dashboard.py, data_logger.py,
+#  passport_generator.py). Dipakai untuk membangun wheelhouse offline.
+#
+#  CATATAN PENTING — torch & torchvision TIDAK ada di file ini.
+#  Keduanya butuh build CUDA khusus Jetson dan TIDAK tersedia di PyPI sebagai
+#  wheel aarch64+CUDA. Install lebih dulu dari index jetson-ai-lab
+#  (lihat docs/DEPLOY_GUIDE_RECELL.md, Tahap 1 & 3). Setelah torch terpasang,
+#  ultralytics di bawah akan melihatnya sudah terpenuhi.
+#
+#  requirements.txt (lengkap) tetap dipakai untuk lingkungan TRAINING di mesin
+#  lain — bukan untuk mesin produksi offline ini.
+# ============================================================================
+
+ultralytics               # YOLOv8 (vision score) — depend pada torch (diinstal terpisah)
+opencv-python-headless    # kamera + anotasi frame
+xgboost                   # prediksi SoH dari fitur discharge
+pandas                    # bangun DataFrame fitur untuk XGBoost
+numpy                     # operasi array (dependency pandas/cv2/pyqtgraph)
+PyQt5                     # GUI dashboard
+pyqtgraph                 # plot discharge curve real-time
+pyserial                  # komunikasi serial JSON dengan STM32
+fpdf                      # generate Battery Passport PDF
+
+# Catatan: versi sengaja TIDAK dipin agar `pip download --platform aarch64`
+# mengambil wheel aarch64 yang kompatibel. Bila perlu reproducibility, pin
+# versi SETELAH memverifikasi wheel-nya tersedia untuk aarch64/cp310.

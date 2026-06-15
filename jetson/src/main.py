@@ -411,7 +411,7 @@ class RecellMaster:
     def run_automated_cycle(self, ground_truth=None):
         self.log_msg("--- Starting Full Automated Cycle ---")
         cycle_start = time.time()
-        battery_id = f"BAT_{int(cycle_start)}"
+        battery_id = time.strftime("RC-%Y%m%d-%H%M%S")
         self.current_battery_id = battery_id
         self.defect_frame_counts = defaultdict(int)
         self.measurement_detail = {}
@@ -461,6 +461,9 @@ class RecellMaster:
             vision_score=self.vision_score,
             volt=self.electrical_data['volt'], curr=self.electrical_data['curr'],
             soh=self.electrical_data['soh'], image_path=img_path,
+            measurement=self.measurement_detail,
+            defects=self.get_confirmed_defects(),
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
         self.log_msg(f"[5] Battery Passport Generated: {pdf_path}")
 

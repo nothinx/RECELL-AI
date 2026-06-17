@@ -59,8 +59,9 @@
             └────────────────┬───────────────┘
                              ▼
             ┌────────────────────────────────┐
-            │   Battery Passport (PDF) +     │
-            │   grading_log.csv + discharge  │
+            │  Battery Passport (PDF + QR    │
+            │  bertanda tangan HMAC-SHA256)  │
+            │  grading_log.csv + discharge   │
             └────────────────────────────────┘
 ```
 
@@ -163,7 +164,7 @@ Output: prediksi SoH (%) dengan clamp `[0, 100]`. Fallback rule-based aktif jika
 [2] Konveyor → PROX 1 (Sensor Station)
 [3] Push sensor + Constant-Current Load Test (~2s discharge curve)
 [4] Hitung Grade (A / B / R) dari vision_score + SoH
-[5] Generate Battery Passport (PDF)
+[5] Generate Battery Passport (PDF + QR bertanda tangan HMAC-SHA256)
 [6] Routing:
     - Grade A → PROX 2 → Eject ke bin A
     - Grade B/R → END_OF_CONVEYOR → bin reject
@@ -178,11 +179,83 @@ Emergency Stop dapat memutus cycle di langkah manapun (set `abort_cycle` flag, p
 
 | File | Path | Isi |
 | :--- | :--- | :--- |
-| Battery Passport | `jetson/data/passports/Passport_<ID>.pdf` | Sertifikat per-baterai: ID, grade, foto, V/I/SoH |
+| Battery Passport | `jetson/data/passports/Passport_<ID>.pdf` | Sertifikat per-baterai: ID, grade, foto, V/I/SoH + QR bertanda tangan HMAC-SHA256 |
 | Grading log | `jetson/data/logs/grading_log.csv` | 1 baris per cycle: semua metrik agregat + ground truth |
 | Discharge curve | `jetson/data/logs/discharge_curve.csv` | Time-series 20 ms cadence: t_ms, voltage, current, temp |
 
 `battery_id` shared antar 3 file, jadi kurva discharge bisa di-join balik ke grade-nya untuk analisa offline.
+
+---
+
+## 🔐 Battery Passport Bertanda Tangan (Anti-Pemalsuan)
+
+Setiap Battery Passport membawa **QR bertanda tangan kriptografis** agar sertifikat tidak bisa dipalsukan — semua **100% offline**, hanya memakai stdlib Python (`hmac`, `hashlib`, `secrets`), tanpa dependency berat.
+
+**Cara kerja:**
+1. Field uji disusun jadi payload kanonik berurutan tetap:
+   `RC1|id|grade|soh|v_drop|internal_r|date` (presisi tiap field dikunci agar reproducible).
+2. Payload ditandatangani **HMAC-SHA256** dengan kunci rahasia **per-alat**.
+3. QR berisi `<payload>~<signature>`. Mengubah **satu field pun** membuat tanda tangan tidak cocok.
+
+**Kunci penandatangan** (`jetson/config/passport_key.txt`):
+- Auto-generate acak (64 hex) saat pertama kali dipakai, unik per unit.
+- **RAHASIA** — sudah masuk `.gitignore`, jangan pernah di-commit. Backup terpisah.
+
+**Verifikasi sebuah QR (offline):**
+```bash
+python jetson/scripts/verify_passport.py "<isi_string_QR>"
+# → cetak VALID / INVALID + field terurai
+# → exit code 0 (VALID) / 1 (INVALID) — gampang dipakai di skrip
+```
+
+Verifier tetap menampilkan isi yang *diklaim* meski tanda tangan gagal, sekaligus menandainya **INVALID** — jadi pemeriksa bisa lihat data palsunya.
+
+> Modul: [`jetson/src/passport_auth.py`](./jetson/src/passport_auth.py) (sign/verify) · [`jetson/scripts/verify_passport.py`](./jetson/scripts/verify_passport.py) (CLI verifier)
+
+---
+
+## 🔁 Protokol Sinkronisasi Firmware ↔ GUI
+
+Jetson dan STM32 bicara lewat **newline-delimited JSON** over USB-CDC @ **115200 8N1**. Kontrak ini bersifat **kanonik** — kedua sisi harus sepakat soal nama command, status, dan field. Sebuah regression test (`tests/test_protocol_sync.py`) memastikan tak ada satu sisi yang me-*rename* tanpa sisi lain ikut.
+
+### Arah Jetson → STM32 (Command)
+Paket dikirim `send_command(cmd, params)` → `{"cmd": "<NAMA>", ...params}\n`.
+
+| Command | Aksi di STM32 |
+| :--- | :--- |
+| `RESET` | Homing semua stepper ke limit switch, reset state |
+| `MOVE_TO_PROX_1` | Konveyor jalan sampai baterai di Sensor Station |
+| `APPLY_SENSOR_AND_MEASURE` | Push probe + Constant-Current Load Test → stream kurva discharge |
+| `MOVE_TO_PROX_2` | Konveyor jalan ke titik eject Grade A |
+| `EJECT_A` | Stepper sorting dorong baterai ke bin A |
+| `MOVE_TO_END` | Konveyor jalan ke ujung (bin reject B/R) |
+| `STOP_CONVEYOR` | Hentikan konveyor |
+
+### Arah STM32 → Jetson (Status)
+Firmware memancarkan `{"status": "<NAMA>", ...field}\n`.
+
+| Status | Dipakai Jetson? | Arti |
+| :--- | :---: | :--- |
+| `BOOT_OK` | — | Firmware siap setelah power-on |
+| `AT_PROX_1` / `AT_PROX_2` | ✅ | Baterai sampai di Sensor / titik eject |
+| `DISCHARGE_SAMPLE` | ✅ | Satu sampel kurva discharge (streaming ~20 ms) |
+| `MEASUREMENT_DONE` | ✅ | Load test selesai, kirim agregat akhir |
+| `EJECTED_A` / `DROPPED_B` | ✅ | Routing fisik selesai (bin A / bin reject) |
+| `EMERGENCY_STOP` | ✅ | Tombol E-Stop ditekan → abort cycle |
+| `STEP_TIMEOUT` | ✅ | Stepper tak capai limit dalam waktu wajar (fault) |
+| `STOPPED` / `RESET_OK` | — | Ack untuk `STOP_CONVEYOR` / `RESET` |
+
+### Skema Field JSON
+| Pesan | Field |
+| :--- | :--- |
+| `MEASUREMENT_DONE` | `volt`, `curr`, `v_resting`, `temp_pre`, `temp_post`, `temp_delta` |
+| `DISCHARGE_SAMPLE` | `t_ms`, `volt`, `curr`, `temp` |
+
+> **Jaga kontrak tetap sinkron** — jalankan test sebelum mengubah protokol:
+> ```bash
+> python tests/test_protocol_sync.py     # tanpa pytest pun bisa (blok __main__)
+> ```
+> Test ini scan `RECELL_STM32.ino`, `main.py`, dan `ui_dashboard.py`; gagal kalau ada command/status/field yang tidak cocok di kedua sisi.
 
 ---
 
@@ -209,6 +282,7 @@ Emergency Stop dapat memutus cycle di langkah manapun (set `abort_cycle` flag, p
 | YOLO load + inferensi webcam | ✅ | Terverifikasi (3 kelas, KARAT/SEHAT/SOBEK) |
 | XGBoost SoH prediksi | ⚠️ | Load OK, akurasi perlu validasi pada baterai nyata |
 | Battery Passport PDF | ✅ | PDF tergenerasi end-to-end |
+| Tanda tangan & verifikasi QR passport | ✅ | Sign/verify HMAC-SHA256 ter-cover unit test (`tests/test_passport_auth.py`) |
 | CSV grading + discharge log | ✅ | Schema lengkap, sample tersimpan benar |
 | Emergency Stop full abort | ⚠️ | Logic ada, validasi di lab dengan STM32 |
 | Komunikasi serial STM32 | ❌ | Butuh hardware |

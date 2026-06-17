@@ -87,6 +87,14 @@ class RecellMaster:
         # Initialize Vision (YOLO)
         self.model = None
         if not self.mock_ai:
+            # Matikan telemetry/sync SEBELUM init — mencegah HTTP call di Jetson air-gapped.
+            # setup.sh sudah mempersistnya ke ~/.config/Ultralytics/settings.yaml, tapi
+            # ini adalah fallback agar efektif bahkan saat dijalankan di laptop dev.
+            try:
+                from ultralytics import settings as _uly
+                _uly.update({"sync": False})
+            except Exception:
+                pass
             try:
                 from ultralytics import YOLO
                 if YOLO_ENGINE_PATH.exists():

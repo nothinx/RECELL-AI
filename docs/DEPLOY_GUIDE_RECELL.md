@@ -8,16 +8,26 @@ Mesin satu-satunya yang sesekali online adalah **laptop Windows** Anda → berpe
 **mesin staging** (mengunduh paket) sekaligus **sumber transfer `scp`**.
 
 > **Alur besar:**
-> 1. **Laptop (online):** unduh semua wheel aarch64 ke folder `wheelhouse/`.
-> 2. **Laptop → Jetson (`scp`):** kirim proyek + `wheelhouse/`.
-> 3. **Jetson (offline):** install dari `wheelhouse/` tanpa internet.
-> 4. **Flash STM32** dari laptop, colok ke Jetson.
+>
+> | Langkah | Mesin | Internet? |
+> |---|---|---|
+> | 1. Bangun `wheelhouse/` | **LAPTOP** | **PERLU** |
+> | 2. Transfer via `scp` | Laptop → Jetson | Tidak |
+> | 3. Install offline | **JETSON** | **DILARANG** |
+> | 4. Flash STM32 | **LAPTOP** | Tidak |
+> | 5. Jalankan app | **JETSON** | **DILARANG** |
 
 ---
 
 ## 0. Cara cepat — skrip otomatis
 
-Setelah `wheelhouse/` dibangun (Tahap 1 di bawah), seluruh deploy bisa satu perintah dari laptop (Git Bash / Linux / macOS):
+> **`[LAPTOP — ONLINE]`** Bangun wheelhouse dulu (sekali):
+> ```bash
+> bash laptop/prepare.sh
+> ```
+> Ikuti instruksi unduh manual torch/torchvision dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`.
+
+Setelah `wheelhouse/` lengkap, seluruh deploy bisa satu perintah dari laptop (Git Bash / Linux / macOS):
 
 ```bash
 bash deploy/deploy.sh                  # target default: r2c@r2c.local, ~/RECELL-AI
@@ -60,16 +70,22 @@ Program utama `ui_dashboard.py` adalah GUI PyQt5 — **tidak muncul** lewat SSH 
 
 ## 2. Tahap 1 — Staging dependency di laptop (saat online)
 
+> **`[LAPTOP — ONLINE]`** — Seluruh bagian ini hanya dijalankan di laptop yang terhubung internet.
+> Jetson **tidak butuh dan tidak boleh** mengakses internet di tahap ini.
+
 Tujuan: mengisi folder `wheelhouse/` dengan wheel **aarch64 / cp310** untuk semua dependency runtime.
 
 > **Kenapa rumit?** Laptop Anda x86, Jetson aarch64. Kita tidak menjalankan paketnya di laptop —
 > hanya **mengunduh** wheel untuk arsitektur Jetson, lalu memasangnya di Jetson.
 
-### 2.1 Siapkan folder
+### 2.1 Cara otomatis (disarankan)
+
 ```bash
-cd RECELL-AI
-mkdir -p wheelhouse
+bash laptop/prepare.sh
 ```
+
+Skrip ini melakukan §2.2 dan §2.3 (onnx/onnxslim) secara otomatis, lalu menampilkan checklist
+wheel yang sudah ada dan yang masih perlu diunduh manual (torch/torchvision/onnxruntime-gpu).
 
 ### 2.2 Unduh wheel aarch64 dari PyPI (paket umum)
 Butuh Python + pip di laptop (versi berapa pun — kita pakai *platform tag*, bukan interpreter lokal):
@@ -84,14 +100,18 @@ pip download \
 Ini mengambil wheel aarch64 untuk: `ultralytics`, `opencv-python-headless`, `xgboost`,
 `pandas`, `numpy`, `PyQt5`, `pyqtgraph`, `pyserial`, `fpdf`, beserta dependency-nya.
 
-### 2.3 Unduh torch & torchvision khusus Jetson (CUDA)
-`torch`/`torchvision` **tidak** ada di PyPI sebagai build CUDA Jetson. Ambil dari index **jetson-ai-lab**
-(cocokkan dengan JetPack 6 / CUDA 12.6 — `jp6/cu126`):
+### 2.3 Unduh torch, torchvision & onnxruntime-gpu khusus Jetson (CUDA)
+
+> **`[LAPTOP — ONLINE]`** — Unduh manual ke `wheelhouse/`, tidak bisa diotomatisasi.
+
+`torch`/`torchvision`/`onnxruntime-gpu` **tidak** ada di PyPI sebagai build CUDA Jetson.
+Ambil dari index **jetson-ai-lab** (cocokkan dengan JetPack 6 / CUDA 12.6 — `jp6/cu126`):
 
 - Buka di browser laptop: `https://pypi.jetson-ai-lab.dev/jp6/cu126`
-- Unduh file `.whl` untuk **torch** dan **torchvision** (pilih yang `cp310` / aarch64), simpan ke
-  folder `wheelhouse/`.
-- (Opsional) Bila ultralytics meminta `onnxruntime-gpu`, ambil juga dari index yang sama.
+- Unduh file `.whl` untuk (pilih yang `cp310` / aarch64), simpan ke folder `wheelhouse/`:
+  - **torch**
+  - **torchvision**
+  - **onnxruntime-gpu** ← dibutuhkan saat `yolo export format=engine` (konversi TensorRT offline)
 
 > Referensi resmi PyTorch-for-Jetson juga ada di forum NVIDIA bila index di atas berubah.
 
@@ -99,7 +119,8 @@ Ini mengambil wheel aarch64 untuk: `ultralytics`, `opencv-python-headless`, `xgb
 ```bash
 ls wheelhouse | grep -iE 'torch|torchvision|ultralytics|opencv|xgboost|pandas|numpy|PyQt5|pyqtgraph|serial|fpdf'
 ```
-Pastikan **torch** dan **torchvision** ADA.
+Pastikan **torch**, **torchvision**, dan **onnxruntime-gpu** ADA (ketiganya dari jetson-ai-lab).
+`laptop/prepare.sh` sudah melakukan pengecekan ini secara otomatis di akhir eksekusi.
 
 > **Risiko jujur:** sebagian kecil paket mungkin hanya tersedia sebagai *sdist* (tanpa wheel
 > aarch64) sehingga gagal di-`pip download` dari x86. Jika ada yang hilang:
@@ -109,6 +130,8 @@ Pastikan **torch** dan **torchvision** ADA.
 ---
 
 ## 3. Tahap 2 — Transfer ke Jetson via `scp` (dari Windows)
+
+> **`[LAPTOP → JETSON]`** — Dari laptop ke Jetson via jaringan lokal. Tidak ada internet di jalur ini.
 
 `scp` & `ssh` sudah tersedia di **Git Bash** dan **OpenSSH** bawaan Windows 10/11.
 
@@ -137,6 +160,9 @@ Ini menyalin kode + `wheelhouse/` + model `best.pt` ke `~/RECELL-AI` di Jetson.
 
 ## 4. Tahap 3 — Install di Jetson (offline)
 
+> **`[JETSON — OFFLINE]`** — Seluruh bagian ini dijalankan di Jetson via SSH. Tidak ada perintah
+> yang membutuhkan internet. Semua instalasi dari `wheelhouse/` lokal.
+
 SSH ke Jetson, lalu:
 ```bash
 cd ~/RECELL-AI
@@ -159,6 +185,11 @@ pip install --no-index --find-links=./wheelhouse -r jetson/requirements-jetson-r
 ```
 
 ### Konversi model ke TensorRT (sekali, offline)
+
+> **`[JETSON — OFFLINE]`** — Perintah ini dijalankan di Jetson. Tidak butuh internet **asalkan**
+> `onnx`, `onnxslim`, dan `onnxruntime-gpu` sudah ada di `wheelhouse/` dan sudah terinstall
+> oleh `setup.sh`. Bila belum, `yolo export` akan mencoba mengunduh dari internet dan **gagal**.
+
 Untuk inferensi cepat di Jetson, ubah `best.pt` → `best.engine` (memakai ultralytics lokal):
 ```bash
 source venv/bin/activate
@@ -166,6 +197,10 @@ cd ~/RECELL-AI/jetson
 yolo export model=models/weights/best.pt format=engine device=0
 # hasil best.engine -> letakkan di models/weights/ ; main.py otomatis memilihnya bila ada
 ```
+
+Jika `yolo export` error dengan pesan "No matching distribution" untuk onnx/onnxruntime-gpu:
+kembali ke laptop, unduh wheel yang kurang dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`,
+transfer ke `wheelhouse/`, lalu jalankan `pip install --no-index --find-links=./wheelhouse onnx onnxslim onnxruntime-gpu` di Jetson.
 
 ### Autostart saat boot (produksi)
 **`setup.sh` sudah memasang & meng-enable service ini otomatis** (lihat §0). Unit yang
@@ -196,6 +231,9 @@ Pasang ulang manual bila perlu: `bash setup.sh` (atau `--no-service` untuk melew
 ---
 
 ## 5. Flashing Firmware STM32 (dari laptop)
+
+> **`[LAPTOP — ONLINE opsional]`** — Arduino IDE perlu internet pertama kali untuk mengunduh board
+> package STM32. Setelah board package terinstall, flashing tidak butuh internet.
 
 Firmware produksi: `firmware/RECELL_STM32/RECELL_STM32.ino` (v2 — mekanik teruji WORKFLOW_TEST).
 
@@ -235,6 +273,8 @@ Cabut STM32 dari laptop, colok ke port USB **Jetson**. Kernel Jetson akan memeta
 
 ## 6. Menjalankan
 
+> **`[JETSON — OFFLINE]`** — Semua perintah di bawah dijalankan di Jetson. Tidak ada internet dibutuhkan.
+
 ```bash
 cd ~/RECELL-AI/jetson/src
 source ../../venv/bin/activate
@@ -254,6 +294,8 @@ Indikator status (pill di header) harus menyala: **CAMERA**, **STM32**, **YOLO**
 | Gejala | Penyebab & solusi |
 |---|---|
 | `pip ... No matching distribution` saat offline install | Wheel paket itu tidak ada di `wheelhouse/`. Ulangi Tahap 1 untuk paket tsb (cek nama & versi aarch64/cp310), atau ambil dari jetson-ai-lab. |
+| YOLO load lambat (delay 10-30 detik) di Jetson | ultralytics telemetry masih mencoba koneksi. Jalankan: `source venv/bin/activate && python -c "from ultralytics import settings; settings.update({'sync': False})"` |
+| `yolo export` error saat konversi TensorRT | onnx/onnxslim/onnxruntime-gpu tidak ada di `wheelhouse/`. Unduh dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`, transfer, `pip install --no-index --find-links=./wheelhouse onnx onnxslim onnxruntime-gpu`. |
 | `torch.cuda.is_available()` → `False` | Wheel torch bukan build CUDA Jetson. Ganti dengan wheel dari `jetson-ai-lab.dev/jp6/cu126` yang cocok JetPack Anda. |
 | STM32 pill **OFFLINE** | Cek `/dev/ttyUSB0` ada (`ls /dev/ttyUSB*`); sesuaikan `SERIAL_PORT` di `main.py`; pastikan user di grup `dialout` (`sudo usermod -aG dialout $USER`, lalu re-login). |
 | Kamera tidak terdeteksi | `ls /dev/video*`; coba index lain di `cv2.VideoCapture(0)`; pastikan kamera USB terpasang. |

@@ -44,21 +44,34 @@ pip install --no-index --find-links="$WHEELHOUSE" torch torchvision
 echo "[*] Install dependency runtime dari wheelhouse..."
 pip install --no-index --find-links="$WHEELHOUSE" -r jetson/requirements-jetson-runtime.txt
 
-# 5. Buat struktur folder data
+# 5. Matikan ultralytics telemetry (persists ke ~/.config/Ultralytics/settings.yaml)
+#    Ini mencegah HTTP timeout saat YOLO pertama kali diload di Jetson air-gapped.
+echo "[*] Matikan ultralytics telemetry (air-gapped)..."
+python -c "from ultralytics import settings; settings.update({'sync': False})" || \
+  echo "    [WARN] Gagal matikan telemetry — abaikan bila ultralytics belum terpasang (akan dicoba ulang saat runtime)."
+
+# 5b. Pre-install ONNX export deps (opsional, untuk 'yolo export format=engine')
+#     Tanpa ini, ultralytics mencoba pip install onnx/onnxslim dari internet saat export.
+echo "[*] Pre-install ONNX export deps (untuk konversi TensorRT offline)..."
+pip install --no-index --find-links="$WHEELHOUSE" onnx onnxslim 2>/dev/null && \
+  echo "    + onnx, onnxslim terinstall." || \
+  echo "    [INFO] onnx/onnxslim tidak ada di wheelhouse — tambahkan ke wheelhouse laptop jika ingin konversi TensorRT offline (lihat docs §4)."
+
+# 6. Buat struktur folder data
 echo "[*] Membuat folder data..."
 mkdir -p jetson/data/passports
 mkdir -p jetson/data/logs
 mkdir -p jetson/models/weights
 mkdir -p jetson/models/engines
 
-# 6. Verifikasi CUDA torch
+# 7. Verifikasi CUDA torch
 echo "[*] Verifikasi PyTorch + CUDA..."
 python -c "import torch; print('torch', torch.__version__, '| CUDA tersedia:', torch.cuda.is_available())" || \
   echo "[WARN] Verifikasi torch gagal — cek wheel torch di wheelhouse cocok dgn JetPack/CUDA Jetson."
 
 deactivate 2>/dev/null || true
 
-# 7. Service systemd autostart (GUI di monitor HDMI Jetson)
+# 8. Service systemd autostart (GUI di monitor HDMI Jetson)
 #    Lewati dengan: bash setup.sh --no-service
 if [ "${1:-}" = "--no-service" ]; then
   echo "[*] --no-service: lewati pemasangan systemd service."

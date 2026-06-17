@@ -17,12 +17,15 @@
 # ============================================================================
 
 ultralytics               # YOLOv8 (vision score) — depend pada torch (diinstal terpisah)
-opencv-python-headless    # kamera + anotasi frame
+# opencv-python-headless  # JANGAN diinstall via pip — pakai cv2 bawaan JetPack (CUDA-enabled,
+#                         # aksesibel via --system-site-packages). Install pip akan menimpa
+#                         # dengan versi CPU-only.
 xgboost                   # prediksi SoH dari fitur discharge
 pandas                    # bangun DataFrame fitur untuk XGBoost
 numpy                     # operasi array (dependency pandas/cv2/pyqtgraph)
-PyQt5                     # GUI dashboard
-pyqtgraph                 # plot discharge curve real-time
+# PyQt5                   # JANGAN diinstall via pip — tidak ada wheel aarch64 di PyPI.
+#                         # Pakai python3-pyqt5 bawaan JetPack (aksesibel via --system-site-packages).
+pyqtgraph                 # plot discharge curve real-time (pure-Python, wheel any)
 pyserial                  # komunikasi serial JSON dengan STM32
 reportlab                 # render sertifikat passport baterai (A5 PDF, vektor)
 qrcode                    # QR ber-HMAC di sertifikat (pure-Python, tanpa Pillow)

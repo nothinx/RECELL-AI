@@ -33,8 +33,9 @@ mkdir -p "$WHEELHOUSE"
 # 1. Unduh wheel runtime aarch64/cp310 dari PyPI
 echo ""
 echo "[1/3] Mengunduh wheel runtime (aarch64, Python 3.10) dari PyPI..."
-echo "      Paket: ultralytics, opencv-python-headless, xgboost, pandas, numpy,"
-echo "             PyQt5, pyqtgraph, pyserial, reportlab, qrcode, Pillow, fpdf"
+echo "      Paket: ultralytics, xgboost, pandas, numpy, pyqtgraph, pyserial,"
+echo "             reportlab, qrcode, Pillow, fpdf"
+echo "      (PyQt5 & opencv dilewati — pakai sistem JetPack via --system-site-packages)"
 pip download \
   --only-binary=:all: \
   --platform manylinux2014_aarch64 \

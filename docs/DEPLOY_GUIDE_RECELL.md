@@ -15,6 +15,27 @@ Mesin satu-satunya yang sesekali online adalah **laptop Windows** Anda → berpe
 
 ---
 
+## 0. Cara cepat — skrip otomatis
+
+Setelah `wheelhouse/` dibangun (Tahap 1 di bawah), seluruh deploy bisa satu perintah dari laptop (Git Bash / Linux / macOS):
+
+```bash
+bash deploy/deploy.sh                  # target default: r2c@r2c.local, ~/RECELL-AI
+bash deploy/deploy.sh user@host dir    # target lain
+```
+
+`deploy/deploy.sh` otomatis: (1) buat & salin SSH key (password Jetson diminta **sekali**, tak disimpan), (2) transfer proyek + `wheelhouse/` via tar-over-ssh, (3) jalankan `setup.sh` di Jetson.
+
+`setup.sh` lalu install dependency offline **dan** memasang **systemd service `recell`** yang menjalankan GUI di monitor HDMI Jetson otomatis saat boot ke desktop (`graphical.target`, `DISPLAY=:0`). Lewati pemasangan service dengan `bash setup.sh --no-service`.
+
+> **Syarat GUI autostart:** Jetson harus **auto-login ke desktop** (Settings → Users → Automatic Login). Tanpa sesi desktop aktif, service GUI tak punya display untuk digambar.
+
+Perintah service di Jetson: `sudo systemctl start|status recell` · log realtime `journalctl -u recell -f`.
+
+Sisanya (Tahap 1–7 di bawah) adalah rincian manual & troubleshooting dari langkah-langkah yang diotomatisasi skrip di atas.
+
+---
+
 ## 1. Akses Jetson via SSH
 
 Jetson menjalankan Ubuntu. SSH dipakai untuk menjalankan perintah CLI & transfer file.
@@ -146,25 +167,31 @@ yolo export model=models/weights/best.pt format=engine device=0
 # hasil best.engine -> letakkan di models/weights/ ; main.py otomatis memilihnya bila ada
 ```
 
-### Autostart saat boot (opsional, produksi)
-Buat service systemd `/etc/systemd/system/recell.service`:
+### Autostart saat boot (produksi)
+**`setup.sh` sudah memasang & meng-enable service ini otomatis** (lihat §0). Unit yang
+dibuat (`/etc/systemd/system/recell.service`) — path & user diisi otomatis dari sesi:
 ```ini
 [Unit]
-Description=RECELL-AI Dashboard
-After=multi-user.target
+Description=RECELL-AI Battery Grading Dashboard
+After=graphical.target
+Wants=graphical.target
 
 [Service]
 Type=simple
 User=<user_jetson>
 WorkingDirectory=/home/<user_jetson>/RECELL-AI/jetson/src
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/<user_jetson>/.Xauthority
 ExecStart=/home/<user_jetson>/RECELL-AI/venv/bin/python ui_dashboard.py
 Restart=on-failure
-Environment=DISPLAY=:0
+RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
 ```
-Aktifkan: `sudo systemctl enable --now recell.service`.
+GUI butuh sesi X aktif → unit pakai `graphical.target` + `DISPLAY=:0` + `XAUTHORITY`,
+dan **Jetson harus auto-login ke desktop** agar layar HDMI tergambar saat boot.
+Pasang ulang manual bila perlu: `bash setup.sh` (atau `--no-service` untuk melewati).
 
 ---
 

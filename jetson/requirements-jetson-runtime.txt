@@ -30,7 +30,6 @@ pyserial                  # komunikasi serial JSON dengan STM32
 reportlab                 # render sertifikat passport baterai (A5 PDF, vektor)
 qrcode                    # QR ber-HMAC di sertifikat (pure-Python, tanpa Pillow)
 Pillow                    # decode foto baterai (JPEG) untuk drawImage reportlab
-fpdf                      # (legacy) fallback PDF lama bila diperlukan
 
 # Catatan: versi sengaja TIDAK dipin agar `pip download --platform aarch64`
 # mengambil wheel aarch64 yang kompatibel. Bila perlu reproducibility, pin

@@ -34,7 +34,7 @@ mkdir -p "$WHEELHOUSE"
 echo ""
 echo "[1/3] Mengunduh wheel runtime (aarch64, Python 3.10) dari PyPI..."
 echo "      Paket: ultralytics, xgboost, pandas, numpy, pyqtgraph, pyserial,"
-echo "             reportlab, qrcode, Pillow, fpdf"
+echo "             reportlab, qrcode, Pillow"
 echo "      (PyQt5 & opencv dilewati — pakai sistem JetPack via --system-site-packages)"
 pip download \
   --only-binary=:all: \

@@ -37,19 +37,27 @@ COL_BORDER      = "#E2E8F0"   # hairline border
 COL_TEXT        = "#0F172A"   # slate-900 main text
 COL_HEADING     = "#1E293B"   # slate-800 (card titles)
 COL_MUTED       = "#64748B"   # slate-500
-COL_ACCENT      = "#10B981"   # emerald 500 (voltage / Grade A)
-COL_INFO        = "#3B82F6"   # blue 500 (current / info)
-COL_WARN        = "#F59E0B"   # amber 500 (SOH / testing)
+COL_ACCENT      = "#10B981"   # emerald 500 — FILLS only (dots, plot, button bg)
+COL_INFO        = "#3B82F6"   # blue 500 — fills
+COL_WARN        = "#F59E0B"   # amber 500 — fills
 COL_PURPLE      = "#8B5CF6"   # violet 500 (vision / accent variety)
-COL_ERROR       = "#EF4444"   # red 500 (reject / stop)
+COL_ERROR       = "#EF4444"   # red 500 — fills (stop button bg, chips)
 COL_STANDBY     = "#94A3B8"   # slate-400
+
+# Text-on-light variants — darker shades so large headline values (grade, SOH,
+# voltage) clear WCAG contrast on white/pale backgrounds. The -500 tokens above
+# wash out as text (≈2.1–2.5:1); these land at ≈4.8–5.9:1. Use for TEXT, never fills.
+COL_ACCENT_TXT  = "#047857"   # emerald 700
+COL_INFO_TXT    = "#2563EB"   # blue 600
+COL_WARN_TXT    = "#B45309"   # amber 700
+COL_ERROR_TXT   = "#B91C1C"   # red 700
 
 
 GRADE_COLORS = {
     # (text color, subtitle, soft bg, border)
-    "A": (COL_ACCENT, "Second-Life Compatible", "#ECFDF5", "#A7F3D0"),
-    "B": (COL_WARN,   "Refurbish / Limited Use", "#FFFBEB", "#FDE68A"),
-    "R": (COL_ERROR,  "Rejected (Recycle)",      "#FEF2F2", "#FECACA"),
+    "A": (COL_ACCENT_TXT, "Second-Life Compatible",  "#ECFDF5", "#A7F3D0"),
+    "B": (COL_WARN_TXT,   "Refurbish / Limited Use", "#FFFBEB", "#FDE68A"),
+    "R": (COL_ERROR_TXT,  "Rejected (Recycle)",      "#FEF2F2", "#FECACA"),
 }
 
 
@@ -75,7 +83,7 @@ QPushButton {{
 QPushButton#btnStart {{ background-color: {COL_ACCENT}; color: white; }}
 QPushButton#btnStart:hover {{ background-color: #059669; }}
 QPushButton#btnStart:pressed {{ background-color: #047857; }}
-QPushButton#btnStart:disabled {{ background-color: #D1FAE5; color: #6EE7B7; }}
+QPushButton#btnStart:disabled {{ background-color: #D1FAE5; color: {COL_ACCENT_TXT}; }}
 QPushButton#btnStop {{ background-color: {COL_ERROR}; color: white; }}
 QPushButton#btnStop:hover {{ background-color: #DC2626; }}
 QPushButton#btnStop:pressed {{ background-color: #B91C1C; }}
@@ -178,9 +186,12 @@ class StatusPill(QFrame):
 
 class MetricCard(Card):
     """A card displaying one big metric value with a unit and subtitle."""
-    def __init__(self, title, unit, accent=COL_TEXT, parent=None):
+    def __init__(self, title, unit, accent=COL_TEXT, value_color=None, parent=None):
         super().__init__(title=title, accent=accent, parent=parent)
         self.accent = accent
+        # Dot keeps the bright accent; the big value uses a darker, readable
+        # shade (value_color) so it clears contrast on the white card.
+        value_color = value_color or accent
         row = QHBoxLayout()
         row.setSpacing(4)
         row.setAlignment(Qt.AlignBottom)
@@ -189,7 +200,7 @@ class MetricCard(Card):
         f = QFont("Inter", 30, QFont.Bold)
         f.setStyleStrategy(QFont.PreferAntialias)
         self.value_lbl.setFont(f)
-        self.value_lbl.setStyleSheet(f"color:{accent};")
+        self.value_lbl.setStyleSheet(f"color:{value_color};")
 
         self.unit_lbl = QLabel(unit)
         self.unit_lbl.setStyleSheet(
@@ -444,9 +455,9 @@ class RecellDashboard(QMainWindow):
         # Telemetry cards row (3 metrics)
         metrics_row = QHBoxLayout()
         metrics_row.setSpacing(12)
-        self.card_v = MetricCard("Voltage (Loaded)", "V", accent=COL_ACCENT)
-        self.card_i = MetricCard("Load Current", "A", accent=COL_INFO)
-        self.card_soh = MetricCard("State of Health", "%", accent=COL_WARN)
+        self.card_v = MetricCard("Voltage (Loaded)", "V", accent=COL_ACCENT, value_color=COL_ACCENT_TXT)
+        self.card_i = MetricCard("Load Current", "A", accent=COL_INFO, value_color=COL_INFO_TXT)
+        self.card_soh = MetricCard("State of Health", "%", accent=COL_WARN, value_color=COL_WARN_TXT)
         metrics_row.addWidget(self.card_v)
         metrics_row.addWidget(self.card_i)
         metrics_row.addWidget(self.card_soh)
@@ -526,7 +537,7 @@ class RecellDashboard(QMainWindow):
         self.curve_i.setData([], [])
         self._clear_defects()
 
-        self.grade_card.set_state("TESTING…", COL_WARN,
+        self.grade_card.set_state("TESTING…", COL_WARN_TXT,
                                   "Running Electrochemical Analysis",
                                   bg="#FFFBEB", border="#FDE68A")
 
@@ -548,7 +559,7 @@ class RecellDashboard(QMainWindow):
         self.master.send_command("STOP_CONVEYOR")
         self.master.wait_flag = False
         self.update_progress(0, "Aborted")
-        self.grade_card.set_state("ABORTED", COL_ERROR, "Cycle Interrupted",
+        self.grade_card.set_state("ABORTED", COL_ERROR_TXT, "Cycle Interrupted",
                                   bg="#FEF2F2", border="#FECACA")
 
     # ----- SLOTS ------------------------------------------------------------

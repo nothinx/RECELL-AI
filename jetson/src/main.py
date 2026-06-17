@@ -7,7 +7,12 @@ import argparse
 import sys
 import os
 from pathlib import Path
-import xgboost as xgb
+try:
+    import xgboost as xgb
+    _HAS_XGBOOST = True
+except ImportError:
+    xgb = None
+    _HAS_XGBOOST = False
 import pandas as pd
 from collections import defaultdict
 
@@ -103,17 +108,25 @@ class RecellMaster:
         else:
             self.status["yolo"] = "mock"
 
-        # Initialize Electrical SOH AI (XGBoost)
-        self.xgb_model = xgb.XGBRegressor()
-        try:
-            self.xgb_model.load_model(str(XGB_MODEL_PATH))
-            self.log_msg(f"[AI] Loaded XGBoost SOH Model from {XGB_MODEL_PATH}")
-            self.has_xgb = True
-            self.status["xgb"] = "online"
-        except Exception as e:
-            self.log_msg(f"[AI] Failed to load XGBoost: {e}. Will use hardcoded SOH rules.")
+        # Initialize Electrical SOH AI (XGBoost). The package itself is optional:
+        # on a dev box without xgboost installed the app still runs end-to-end
+        # with rule-based SOH instead of crashing at import.
+        self.xgb_model = None
+        if not _HAS_XGBOOST:
+            self.log_msg("[AI] xgboost not installed — using hardcoded SOH rules.")
             self.has_xgb = False
             self.status["xgb"] = "rule"
+        else:
+            self.xgb_model = xgb.XGBRegressor()
+            try:
+                self.xgb_model.load_model(str(XGB_MODEL_PATH))
+                self.log_msg(f"[AI] Loaded XGBoost SOH Model from {XGB_MODEL_PATH}")
+                self.has_xgb = True
+                self.status["xgb"] = "online"
+            except Exception as e:
+                self.log_msg(f"[AI] Failed to load XGBoost: {e}. Will use hardcoded SOH rules.")
+                self.has_xgb = False
+                self.status["xgb"] = "rule"
 
         if not self.simulate:
             try:

@@ -78,6 +78,9 @@ class RecellMaster:
         self.wait_flag = False
         self.abort_cycle = False  # set by Emergency Stop, breaks _simulate_measurement
 
+        self._serial_lock = threading.Lock()        # #5: guard serial r/w across threads
+        self._camera_restart_requested = False      # #8: set by restart_camera()
+
         self.log_msg("=== RECELL-AI Master Controller ===")
         self.log_msg(f"Simulation Mode : {self.simulate}")
         self.log_msg(f"Mock AI Mode    : {self.mock_ai}")
@@ -162,36 +165,52 @@ class RecellMaster:
 
     def reconnect_serial(self, port, baud=115200):
         """Close existing serial connection and open a new one on *port*."""
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
+        with self._serial_lock:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
             self.ser = None
-        try:
-            self.ser = serial.Serial(port, baud, timeout=0.1)
-            self.simulate = False
-            self.status["serial"] = "online"
-            self.log_msg(f"[Comm] Reconnected to STM32 on {port} @ {baud} baud")
-        except Exception as e:
-            self.simulate = True
-            self.status["serial"] = "offline"
-            self.log_msg(f"[Comm] Failed to connect to {port}: {e}")
+            try:
+                self.ser = serial.Serial(port, baud, timeout=0.1)
+                self.simulate = False
+                self.status["serial"] = "online"
+                self.log_msg(f"[Comm] Reconnected to STM32 on {port} @ {baud} baud")
+            except Exception as e:
+                self.simulate = True
+                self.status["serial"] = "offline"
+                self.log_msg(f"[Comm] Failed to connect to {port}: {e}")
         self._notify_status()
         return self.status["serial"] == "online"
 
     def disconnect_serial(self):
         """Close serial port and switch to simulation mode."""
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-        self.ser = None
+        with self._serial_lock:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+            self.ser = None
         self.simulate = True
         self.status["serial"] = "sim"
         self.log_msg("[Comm] Serial disconnected — simulation mode active")
         self._notify_status()
+
+    def restart_camera(self):
+        """Minta vision_thread untuk menutup dan membuka ulang kamera."""
+        self._camera_restart_requested = True
+        self.status["camera"] = "offline"
+        self._notify_status()
+        self.log_msg("[Camera] Restart diminta…")
+
+    def override_grade(self, new_grade):
+        """Override keputusan AI dengan grade manual dari operator."""
+        old = self.grade_decision
+        self.grade_decision = new_grade
+        self.log_msg(f"[Override] Grade diubah: {old} → {new_grade} (manual operator)")
+        self.trigger_telemetry_update()
 
     def log_msg(self, msg):
         print(msg)
@@ -199,34 +218,38 @@ class RecellMaster:
             self.ui_callbacks['on_log'](msg)
 
     def vision_thread(self):
+        """Loop utama kamera — restart otomatis jika restart_camera() dipanggil."""
+        while self.running:
+            self._camera_restart_requested = False
+            self._run_camera_session()
+            # Keluar loop hanya jika running=False (shutdown) atau restart diminta
+            if not self._camera_restart_requested:
+                break
+
+    def _run_camera_session(self):
+        """Satu sesi kamera: buka, inferensi, tutup. Bisa diulang oleh vision_thread."""
         if self.mock_ai:
-            # Idle loop; UI will keep its placeholder.
-            while self.running:
+            while self.running and not self._camera_restart_requested:
                 time.sleep(0.5)
             return
 
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            self.log_msg("[Camera] No webcam detected (cv2.VideoCapture(0) failed). "
-                         "Vision will run as MOCK (no live frames).")
+            self.log_msg("[Camera] Tidak ada kamera (VideoCapture(0) gagal). Mode MOCK.")
             self.status["camera"] = "mock"
             self._notify_status()
             cap.release()
-            while self.running:
+            while self.running and not self._camera_restart_requested:
                 time.sleep(0.5)
             return
 
         self.status["camera"] = "online"
         self._notify_status()
-        self.log_msg("[Camera] Webcam acquired, starting YOLO inference loop.")
+        self.log_msg("[Camera] Kamera aktif, memulai inferensi YOLO.")
 
-        # Cap the loop at ~25 FPS so a CPU-only dev box doesn't pin a core.
-        # On Jetson with TensorRT this still leaves plenty of headroom; raise
-        # to 0 if you need maximum FPS on real hardware.
-        FRAME_PERIOD = 0.04
-
+        FRAME_PERIOD = 0.04  # ~25 FPS cap
         try:
-            while self.running:
+            while self.running and not self._camera_restart_requested:
                 t0 = time.time()
                 ret, frame = cap.read()
                 if not ret:
@@ -242,12 +265,14 @@ class RecellMaster:
                 except Exception as e:
                     self.log_msg(f"[Vision] inference error: {e}")
                     time.sleep(0.1)
-                # Sleep just enough to keep below the target FPS.
                 elapsed = time.time() - t0
                 if elapsed < FRAME_PERIOD:
                     time.sleep(FRAME_PERIOD - elapsed)
         finally:
             cap.release()
+            if self._camera_restart_requested:
+                self.log_msg("[Camera] Sesi ditutup, membuka ulang…")
+                time.sleep(1)
 
     def process_ai_results(self, results):
         # Count each label at most once per frame: many boxes of the same
@@ -303,11 +328,12 @@ class RecellMaster:
 
     def serial_listener(self):
         while self.running:
-            if not self.simulate and self.ser and self.ser.in_waiting > 0:
-                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            with self._serial_lock:
+                ready = (not self.simulate and self.ser and self.ser.in_waiting > 0)
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip() if ready else None
+            if line:
                 try:
                     data = json.loads(line)
-
                     if data.get("status") == "MEASUREMENT_DONE":
                         v = data.get("volt", 0)
                         i = data.get("curr", 0.001)
@@ -315,14 +341,11 @@ class RecellMaster:
                         v_resting = float(data.get("v_resting", 4.2))
                         temp_pre = float(data.get("temp_pre", 25.0))
                         temp_post = float(data.get("temp_post", temp_pre + t_delta))
-
                         self.electrical_data["volt"] = v
                         self.electrical_data["curr"] = i
-
                         v_drop = v_resting - v
                         safe_i = i if i > 0 else 0.001
                         internal_r = v_drop / safe_i
-
                         if self.has_xgb:
                             features = pd.DataFrame(
                                 [[v_drop, internal_r, t_delta]],
@@ -331,7 +354,6 @@ class RecellMaster:
                             self.electrical_data["soh"] = max(0, min(100, float(pred_soh)))
                         else:
                             self.electrical_data["soh"] = 85.0 if v > 3.6 else 40.0
-
                         self.measurement_detail = {
                             "v_resting": v_resting,
                             "v_loaded": v,
@@ -342,10 +364,8 @@ class RecellMaster:
                             "temp_post": temp_post,
                             "temp_delta": t_delta,
                         }
-
                         self.trigger_telemetry_update()
                         self.wait_flag = False
-
                     elif data.get("status") == "DISCHARGE_SAMPLE":
                         t_ms = data.get("t_ms", 0)
                         v = data.get("volt", 0)
@@ -355,26 +375,16 @@ class RecellMaster:
                             self.logger.log_discharge_sample(
                                 self.current_battery_id, t_ms, v, i, t)
                         self._emit_discharge_sample(t_ms, v, i, t)
-
                     elif data.get("status") in ["AT_PROX_1", "AT_PROX_2", "EJECTED_A", "DROPPED_B"]:
                         self.wait_flag = False
-
                     elif data.get("status") == "EMERGENCY_STOP":
-                        # Hardware E-stop on the STM32. Abort the running cycle
-                        # and release any wait so run_automated_cycle() doesn't
-                        # hang forever waiting on a step that will never finish.
                         self.log_msg("[STM32] HARDWARE EMERGENCY STOP — aborting cycle.")
                         self.abort_cycle = True
                         self.wait_flag = False
-
                     elif data.get("status") == "STEP_TIMEOUT":
-                        # Firmware hit a per-step timeout (jammed battery / failed
-                        # limit switch). Abort the cycle gracefully instead of
-                        # hanging forever on a step that will never complete.
                         self.log_msg("[STM32] STEP TIMEOUT — firmware aborted a step. Aborting cycle.")
                         self.abort_cycle = True
                         self.wait_flag = False
-
                 except Exception:
                     pass
             time.sleep(0.01)
@@ -390,8 +400,9 @@ class RecellMaster:
                 self._simulate_measurement()
             self.wait_flag = False
         else:
-            if self.ser:
-                self.ser.write(payload.encode())
+            with self._serial_lock:
+                if self.ser:
+                    self.ser.write(payload.encode())
 
     def _simulate_measurement(self):
         """Produce a realistic measurement and a short discharge curve in --sim mode.
@@ -569,6 +580,8 @@ class RecellMaster:
                 return
 
         self.log_msg("--- Cycle Complete ---")
+        if pdf_path and 'on_passport' in self.ui_callbacks:
+            self.ui_callbacks['on_passport'](pdf_path, self.grade_decision)
 
     def _aborted(self):
         if self.abort_cycle:

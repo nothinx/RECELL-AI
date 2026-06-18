@@ -5,6 +5,7 @@ Nano's display but works on any desktop Linux with Qt.
 """
 
 import sys
+import subprocess
 import cv2
 import numpy as np
 import threading
@@ -159,7 +160,6 @@ class StatusPill(QFrame):
         self.setStyleSheet(self._base_style)
         if clickable:
             self.setCursor(Qt.PointingHandCursor)
-            self.setToolTip("Klik untuk konfigurasi port serial")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 0, 14, 0)
         lay.setSpacing(8)
@@ -467,6 +467,7 @@ class UIBridge(QObject):
     discharge_signal = pyqtSignal(dict)
     status_signal = pyqtSignal(dict)
     init_done_signal = pyqtSignal()
+    passport_signal = pyqtSignal(str, str)   # (pdf_path, grade)
 
 
 # ----- MAIN WINDOW ----------------------------------------------------------
@@ -495,6 +496,7 @@ class RecellDashboard(QMainWindow):
         self.bridge.discharge_signal.connect(self.update_discharge)
         self.bridge.status_signal.connect(self.update_status)
         self.bridge.init_done_signal.connect(self._on_master_ready)
+        self.bridge.passport_signal.connect(self._on_passport_ready)
 
         self._init_master(simulate, mock_ai)
 
@@ -570,7 +572,8 @@ class RecellDashboard(QMainWindow):
         self._clock_timer.timeout.connect(lambda: self.clock_lbl.setText(time.strftime("%H:%M:%S")))
         self._clock_timer.start(1000)
 
-        self.pill_camera = StatusPill("CAMERA")
+        self.pill_camera = StatusPill("CAMERA", clickable=True)
+        self.pill_camera.clicked.connect(self._restart_camera)
         self.pill_serial = StatusPill("STM32", clickable=True)
         self.pill_serial.clicked.connect(self._open_serial_config)
         self.pill_yolo   = StatusPill("YOLO")
@@ -674,9 +677,45 @@ class RecellDashboard(QMainWindow):
         self.grade_card = GradeCard()
         glow = QGraphicsDropShadowEffect()
         glow.setBlurRadius(24); glow.setOffset(0, 4)
-        glow.setColor(QColor(15, 23, 42, 35))  # soft slate shadow
+        glow.setColor(QColor(15, 23, 42, 35))
         self.grade_card.setGraphicsEffect(glow)
         col.addWidget(self.grade_card)
+
+        # Baris aksi pasca-siklus: override grade + buka passport
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        override_lbl = QLabel("Override:")
+        override_lbl.setStyleSheet(
+            f"color:{COL_MUTED}; font-size:11px; font-weight:700; letter-spacing:0.5px;"
+        )
+        action_row.addWidget(override_lbl)
+
+        for grade, color in [("A", COL_ACCENT), ("B", COL_WARN), ("R", COL_ERROR)]:
+            btn = QPushButton(f"  {grade}  ")
+            btn.setFixedHeight(32)
+            btn.setStyleSheet(
+                f"background:{color}; color:white; border-radius:8px;"
+                f"font-size:13px; font-weight:900; padding:0 10px;"
+            )
+            btn.clicked.connect(lambda _, g=grade: self._override_grade(g))
+            setattr(self, f"btn_override_{grade}", btn)
+            btn.setEnabled(False)
+            action_row.addWidget(btn)
+
+        action_row.addStretch(1)
+
+        self.btn_passport = QPushButton("📄  Buka Passport")
+        self.btn_passport.setFixedHeight(32)
+        self.btn_passport.setStyleSheet(
+            f"background:{COL_INFO}; color:white; border-radius:8px;"
+            f"font-size:12px; font-weight:700;"
+        )
+        self.btn_passport.setEnabled(False)
+        self.btn_passport.clicked.connect(self._open_passport)
+        self._last_pdf_path = None
+        action_row.addWidget(self.btn_passport)
+        col.addLayout(action_row)
 
         # Discharge plot
         plot_card = Card(title="Constant Current Load · Discharge Curve",
@@ -728,6 +767,7 @@ class RecellDashboard(QMainWindow):
             'on_log':              self.bridge.log_signal.emit,
             'on_discharge_sample': self.bridge.discharge_signal.emit,
             'on_status':           self.bridge.status_signal.emit,
+            'on_passport':         self.bridge.passport_signal.emit,
         }
 
         def _bg():
@@ -749,6 +789,29 @@ class RecellDashboard(QMainWindow):
         self.log_msg("[BOOT] Sistem siap.")
 
     # ----- ACTIONS ----------------------------------------------------------
+    def _restart_camera(self):
+        if self.master is None:
+            return
+        self.master.restart_camera()
+
+    def _override_grade(self, grade):
+        if self.master is None:
+            return
+        self.master.override_grade(grade)
+        self.grade_card.set_grade(grade)
+
+    def _open_passport(self):
+        if self._last_pdf_path and Path(self._last_pdf_path).exists():
+            subprocess.Popen(['xdg-open', self._last_pdf_path])
+        else:
+            self.log_msg("[!] File passport tidak ditemukan.")
+
+    def _on_passport_ready(self, pdf_path, grade):
+        self._last_pdf_path = pdf_path
+        self.btn_passport.setEnabled(bool(pdf_path))
+        for g in ("A", "B", "R"):
+            getattr(self, f"btn_override_{g}").setEnabled(True)
+
     def _open_serial_config(self):
         if self.master is None:
             return
@@ -773,6 +836,10 @@ class RecellDashboard(QMainWindow):
         self.curve_v.setData([], [])
         self.curve_i.setData([], [])
         self._clear_defects()
+        self._last_pdf_path = None
+        self.btn_passport.setEnabled(False)
+        for g in ("A", "B", "R"):
+            getattr(self, f"btn_override_{g}").setEnabled(False)
 
         self.grade_card.set_state("TESTING…", COL_WARN_TXT,
                                   "Running Electrochemical Analysis",

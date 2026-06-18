@@ -466,6 +466,7 @@ class UIBridge(QObject):
     progress_signal = pyqtSignal(int, str)
     discharge_signal = pyqtSignal(dict)
     status_signal = pyqtSignal(dict)
+    init_done_signal = pyqtSignal()
 
 
 # ----- MAIN WINDOW ----------------------------------------------------------
@@ -478,6 +479,8 @@ class RecellDashboard(QMainWindow):
         self.setStyleSheet(GLOBAL_QSS)
 
         self.cycle_in_progress = False
+        self.master = None          # set oleh _init_master_bg setelah load selesai
+        self._session_count = 0
         self.discharge_t = []
         self.discharge_v = []
         self.discharge_i = []
@@ -491,6 +494,7 @@ class RecellDashboard(QMainWindow):
         self.bridge.progress_signal.connect(self.update_progress)
         self.bridge.discharge_signal.connect(self.update_discharge)
         self.bridge.status_signal.connect(self.update_status)
+        self.bridge.init_done_signal.connect(self._on_master_ready)
 
         self._init_master(simulate, mock_ai)
 
@@ -525,6 +529,46 @@ class RecellDashboard(QMainWindow):
         title_box.addWidget(sub)
         bar.addLayout(title_box)
         bar.addStretch(1)
+
+        # Counter baterai sesi ini
+        counter_box = QVBoxLayout()
+        counter_box.setSpacing(0)
+        counter_box.setAlignment(Qt.AlignCenter)
+        self.counter_lbl = QLabel("0")
+        self.counter_lbl.setStyleSheet(
+            f"color:{COL_ACCENT_TXT}; font-size:22px; font-weight:900;"
+        )
+        self.counter_lbl.setAlignment(Qt.AlignCenter)
+        counter_sub = QLabel("BATERAI SESI INI")
+        counter_sub.setStyleSheet(
+            f"color:{COL_MUTED}; font-size:9px; letter-spacing:1.5px; font-weight:700;"
+        )
+        counter_sub.setAlignment(Qt.AlignCenter)
+        counter_box.addWidget(self.counter_lbl)
+        counter_box.addWidget(counter_sub)
+        bar.addLayout(counter_box)
+
+        # Jam digital
+        clock_box = QVBoxLayout()
+        clock_box.setSpacing(0)
+        clock_box.setAlignment(Qt.AlignCenter)
+        self.clock_lbl = QLabel(time.strftime("%H:%M:%S"))
+        self.clock_lbl.setStyleSheet(
+            f"color:{COL_HEADING}; font-size:20px; font-weight:800; letter-spacing:1px;"
+        )
+        self.clock_lbl.setAlignment(Qt.AlignCenter)
+        clock_date = QLabel(time.strftime("%d %b %Y"))
+        clock_date.setStyleSheet(
+            f"color:{COL_MUTED}; font-size:9px; letter-spacing:1px; font-weight:600;"
+        )
+        clock_date.setAlignment(Qt.AlignCenter)
+        clock_box.addWidget(self.clock_lbl)
+        clock_box.addWidget(clock_date)
+        bar.addLayout(clock_box)
+
+        self._clock_timer = QTimer()
+        self._clock_timer.timeout.connect(lambda: self.clock_lbl.setText(time.strftime("%H:%M:%S")))
+        self._clock_timer.start(1000)
 
         self.pill_camera = StatusPill("CAMERA")
         self.pill_serial = StatusPill("STM32", clickable=True)
@@ -670,28 +714,52 @@ class RecellDashboard(QMainWindow):
 
     # ----- MASTER WIRING ----------------------------------------------------
     def _init_master(self, simulate, mock_ai):
-        self.log_msg("[BOOT] Initializing RECELL-AI Core Engine...")
+        """Tampilkan UI langsung; load YOLO + hardware di background thread."""
+        self.btn_start.setEnabled(False)
+        self.grade_card.set_state("MEMUAT…", COL_INFO_TXT,
+                                  "Memuat model AI & menginisialisasi hardware",
+                                  bg="#EFF6FF", border="#BFDBFE")
+        self.update_progress(0, "Memuat model AI…")
+        self.log_msg("[BOOT] Memulai RECELL-AI Core Engine (background)…")
+
         callbacks = {
-            'on_frame': self.bridge.frame_signal.emit,
-            'on_telemetry': self.bridge.telemetry_signal.emit,
-            'on_log': self.bridge.log_signal.emit,
+            'on_frame':            self.bridge.frame_signal.emit,
+            'on_telemetry':        self.bridge.telemetry_signal.emit,
+            'on_log':              self.bridge.log_signal.emit,
             'on_discharge_sample': self.bridge.discharge_signal.emit,
-            'on_status': self.bridge.status_signal.emit,
+            'on_status':           self.bridge.status_signal.emit,
         }
-        self.master = RecellMaster(simulate=simulate, mock_ai=mock_ai, ui_callbacks=callbacks)
-        self.master_thread = threading.Thread(target=self.master.run, daemon=True)
-        self.master_thread.start()
-        # Push initial status to UI now that signals are connected.
+
+        def _bg():
+            master = RecellMaster(simulate=simulate, mock_ai=mock_ai,
+                                  ui_callbacks=callbacks)
+            self.master = master
+            self.master_thread = threading.Thread(target=master.run, daemon=True)
+            self.master_thread.start()
+            self.bridge.init_done_signal.emit()
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_master_ready(self):
+        """Dipanggil di main thread setelah RecellMaster selesai diinisialisasi."""
         self.update_status(dict(self.master.status))
+        self.grade_card.set_grade("STANDBY")
+        self.update_progress(0, "Standby")
+        self.btn_start.setEnabled(True)
+        self.log_msg("[BOOT] Sistem siap.")
 
     # ----- ACTIONS ----------------------------------------------------------
     def _open_serial_config(self):
+        if self.master is None:
+            return
         dlg = SerialConfigDialog(self.master, parent=self)
         dlg.exec_()
-        # Refresh pill setelah dialog ditutup
         self.update_status(dict(self.master.status))
 
     def trigger_cycle(self):
+        if self.master is None:
+            self.log_msg("[!] Sistem masih memuat, harap tunggu.")
+            return
         if self.cycle_in_progress:
             self.log_msg("[!] Cycle already in progress.")
             return
@@ -716,13 +784,16 @@ class RecellDashboard(QMainWindow):
     def _run_cycle_wrapper(self):
         try:
             self.master.run_automated_cycle()
+            self._session_count += 1
+            QTimer.singleShot(0, lambda: self.counter_lbl.setText(str(self._session_count)))
         finally:
             self.cycle_in_progress = False
-            # Schedule UI re-enable on main thread via signal
             self.bridge.progress_signal.emit(100, "Cycle complete")
             QTimer.singleShot(0, lambda: self.btn_start.setEnabled(True))
 
     def trigger_stop(self):
+        if self.master is None:
+            return
         self.log_msg(">>> EMERGENCY STOP INITIATED <<<")
         self.master.abort_cycle = True
         self.master.send_command("STOP_CONVEYOR")
@@ -859,7 +930,8 @@ class RecellDashboard(QMainWindow):
             self.defects_container.addWidget(chip)
 
     def closeEvent(self, event):
-        self.master.running = False
+        if self.master is not None:
+            self.master.running = False
         event.accept()
 
 

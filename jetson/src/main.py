@@ -154,6 +154,45 @@ class RecellMaster:
         if "on_status" in self.ui_callbacks:
             self.ui_callbacks["on_status"](dict(self.status))
 
+    @staticmethod
+    def list_serial_ports():
+        """Return list of (port, description) for all detected serial devices."""
+        from serial.tools import list_ports
+        return [(p.device, p.description) for p in list_ports.comports()]
+
+    def reconnect_serial(self, port, baud=115200):
+        """Close existing serial connection and open a new one on *port*."""
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.1)
+            self.simulate = False
+            self.status["serial"] = "online"
+            self.log_msg(f"[Comm] Reconnected to STM32 on {port} @ {baud} baud")
+        except Exception as e:
+            self.simulate = True
+            self.status["serial"] = "offline"
+            self.log_msg(f"[Comm] Failed to connect to {port}: {e}")
+        self._notify_status()
+        return self.status["serial"] == "online"
+
+    def disconnect_serial(self):
+        """Close serial port and switch to simulation mode."""
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+        self.ser = None
+        self.simulate = True
+        self.status["serial"] = "sim"
+        self.log_msg("[Comm] Serial disconnected — simulation mode active")
+        self._notify_status()
+
     def log_msg(self, msg):
         print(msg)
         if 'on_log' in self.ui_callbacks:

@@ -14,6 +14,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QWidget, QFrame, QPlainTextEdit, QProgressBar, QSizePolicy, QGraphicsDropShadowEffect,
+    QDialog, QComboBox, QSpinBox, QDialogButtonBox, QListWidget, QListWidgetItem,
 )
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QImage, QPixmap, QColor
@@ -144,14 +145,21 @@ class Card(QFrame):
 
 
 class StatusPill(QFrame):
-    """A small pill showing a label and a colored dot."""
-    def __init__(self, label, parent=None):
+    """A small pill showing a label and a colored dot. Optionally clickable."""
+    clicked = pyqtSignal()
+
+    def __init__(self, label, clickable=False, parent=None):
         super().__init__(parent)
         self.setFixedHeight(30)
-        self.setStyleSheet(
+        self._clickable = clickable
+        self._base_style = (
             f"background-color:{COL_SURFACE}; border:1px solid {COL_BORDER};"
             f"border-radius:15px;"
         )
+        self.setStyleSheet(self._base_style)
+        if clickable:
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip("Klik untuk konfigurasi port serial")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 0, 14, 0)
         lay.setSpacing(8)
@@ -169,6 +177,11 @@ class StatusPill(QFrame):
         lay.addWidget(self.lbl)
         lay.addWidget(self.val)
         self.set_state("offline")
+
+    def mousePressEvent(self, event):
+        if self._clickable and event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
     def set_state(self, state):
         states = {
@@ -297,6 +310,154 @@ class DefectChip(QLabel):
         self.setAlignment(Qt.AlignCenter)
 
 
+# ----- SERIAL CONFIG DIALOG -------------------------------------------------
+class SerialConfigDialog(QDialog):
+    """Modal dialog to scan, select, and connect to a serial port."""
+
+    def __init__(self, master, parent=None):
+        super().__init__(parent)
+        self.master = master
+        self.setWindowTitle("Konfigurasi Port Serial — STM32")
+        self.setMinimumWidth(420)
+        self.setStyleSheet(f"""
+            QDialog {{ background:{COL_BG}; color:{COL_TEXT}; }}
+            QLabel  {{ color:{COL_TEXT}; }}
+            QComboBox, QSpinBox, QListWidget {{
+                background:{COL_SURFACE}; color:{COL_TEXT};
+                border:1px solid {COL_BORDER}; border-radius:6px; padding:4px 8px;
+                font-size:13px;
+            }}
+            QComboBox::drop-down {{ border:none; }}
+            QPushButton {{
+                border:none; border-radius:8px; padding:8px 16px;
+                font-weight:700; font-size:12px;
+            }}
+        """)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+        lay.setContentsMargins(20, 18, 20, 18)
+
+        # Status baris atas
+        status_row = QHBoxLayout()
+        self._status_dot = QLabel()
+        self._status_dot.setFixedSize(10, 10)
+        self._status_lbl = QLabel("—")
+        self._status_lbl.setStyleSheet(f"color:{COL_MUTED}; font-size:12px; font-weight:700;")
+        status_row.addWidget(self._status_dot)
+        status_row.addWidget(self._status_lbl)
+        status_row.addStretch()
+        lay.addLayout(status_row)
+
+        # Port list
+        lbl_port = QLabel("Port yang tersedia:")
+        lbl_port.setStyleSheet(f"color:{COL_HEADING}; font-weight:700; font-size:12px;")
+        lay.addWidget(lbl_port)
+
+        self.port_list = QListWidget()
+        self.port_list.setFixedHeight(140)
+        self.port_list.setStyleSheet(
+            f"QListWidget::item:selected {{ background:{COL_INFO}; color:white; }}"
+            f"QListWidget::item {{ padding:6px 8px; }}"
+        )
+        lay.addWidget(self.port_list)
+
+        refresh_btn = QPushButton("↻  Refresh Ports")
+        refresh_btn.setStyleSheet(
+            f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};"
+        )
+        refresh_btn.clicked.connect(self._scan_ports)
+        lay.addWidget(refresh_btn)
+
+        # Baud rate
+        baud_row = QHBoxLayout()
+        baud_lbl = QLabel("Baud Rate:")
+        baud_lbl.setStyleSheet(f"color:{COL_HEADING}; font-weight:700; font-size:12px;")
+        self.baud_spin = QSpinBox()
+        self.baud_spin.setRange(9600, 921600)
+        self.baud_spin.setSingleStep(9600)
+        self.baud_spin.setValue(115200)
+        self.baud_spin.setFixedWidth(120)
+        baud_row.addWidget(baud_lbl)
+        baud_row.addWidget(self.baud_spin)
+        baud_row.addStretch()
+        lay.addLayout(baud_row)
+
+        # Tombol aksi
+        btn_row = QHBoxLayout()
+        self.btn_connect = QPushButton("Hubungkan")
+        self.btn_connect.setStyleSheet(f"background:{COL_ACCENT}; color:white;")
+        self.btn_connect.clicked.connect(self._do_connect)
+
+        self.btn_disconnect = QPushButton("Putuskan")
+        self.btn_disconnect.setStyleSheet(f"background:{COL_ERROR}; color:white;")
+        self.btn_disconnect.clicked.connect(self._do_disconnect)
+
+        close_btn = QPushButton("Tutup")
+        close_btn.setStyleSheet(
+            f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};"
+        )
+        close_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(self.btn_connect)
+        btn_row.addWidget(self.btn_disconnect)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+
+        self._scan_ports()
+        self._refresh_status()
+
+    def _scan_ports(self):
+        self.port_list.clear()
+        ports = self.master.list_serial_ports()
+        if ports:
+            for dev, desc in ports:
+                item = QListWidgetItem(f"{dev}  —  {desc}")
+                item.setData(Qt.UserRole, dev)
+                self.port_list.addItem(item)
+            self.port_list.setCurrentRow(0)
+        else:
+            item = QListWidgetItem("Tidak ada port yang terdeteksi")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+            self.port_list.addItem(item)
+
+    def _refresh_status(self):
+        state = self.master.status.get("serial", "offline")
+        colors = {"online": COL_ACCENT, "sim": COL_WARN, "offline": COL_ERROR}
+        labels = {
+            "online":  f"ONLINE — {getattr(self.master.ser, 'port', '?')}",
+            "sim":     "SIMULASI (tidak ada perangkat)",
+            "offline": "OFFLINE",
+        }
+        color = colors.get(state, COL_STANDBY)
+        self._status_dot.setStyleSheet(f"background:{color}; border-radius:5px;")
+        self._status_lbl.setText(labels.get(state, state.upper()))
+        self._status_lbl.setStyleSheet(f"color:{color}; font-size:12px; font-weight:700;")
+        self.btn_disconnect.setEnabled(state == "online")
+
+    def _do_connect(self):
+        item = self.port_list.currentItem()
+        if not item:
+            return
+        port = item.data(Qt.UserRole)
+        if not port:
+            return
+        baud = self.baud_spin.value()
+        self.btn_connect.setText("Menghubungkan…")
+        self.btn_connect.setEnabled(False)
+        ok = self.master.reconnect_serial(port, baud)
+        self.btn_connect.setText("Hubungkan")
+        self.btn_connect.setEnabled(True)
+        self._refresh_status()
+        if not ok:
+            self._status_lbl.setText(f"Gagal terhubung ke {port}")
+
+    def _do_disconnect(self):
+        self.master.disconnect_serial()
+        self._refresh_status()
+
+
 # ----- BRIDGE ---------------------------------------------------------------
 class UIBridge(QObject):
     frame_signal = pyqtSignal(np.ndarray)
@@ -312,7 +473,8 @@ class RecellDashboard(QMainWindow):
     def __init__(self, simulate=False, mock_ai=False):
         super().__init__()
         self.setWindowTitle("RECELL-AI | Intelligent Battery Grading Terminal")
-        self.setGeometry(40, 40, 1440, 860)
+        self.setMinimumSize(900, 600)
+        self.resize(1366, 768)
         self.setStyleSheet(GLOBAL_QSS)
 
         self.cycle_in_progress = False
@@ -365,7 +527,8 @@ class RecellDashboard(QMainWindow):
         bar.addStretch(1)
 
         self.pill_camera = StatusPill("CAMERA")
-        self.pill_serial = StatusPill("STM32")
+        self.pill_serial = StatusPill("STM32", clickable=True)
+        self.pill_serial.clicked.connect(self._open_serial_config)
         self.pill_yolo   = StatusPill("YOLO")
         self.pill_xgb    = StatusPill("XGB")
         for p in (self.pill_camera, self.pill_serial, self.pill_yolo, self.pill_xgb):
@@ -403,7 +566,7 @@ class RecellDashboard(QMainWindow):
         cam_card = Card(title="Edge AI Vision  ·  YOLOv8n", accent=COL_PURPLE)
         self.cam_label = QLabel("INITIALIZING CAMERA…")
         self.cam_label.setAlignment(Qt.AlignCenter)
-        self.cam_label.setMinimumSize(560, 380)
+        self.cam_label.setMinimumSize(320, 200)
         self.cam_label.setStyleSheet(
             f"background-color:{COL_SURFACE_ALT}; color:{COL_MUTED}; "
             f"border:1px dashed {COL_BORDER}; border-radius:8px; font-size:13px;"
@@ -486,7 +649,7 @@ class RecellDashboard(QMainWindow):
         self.plot_widget.addLegend(offset=(10, 8), labelTextColor=COL_HEADING,
                                    brush=pg.mkBrush('#FFFFFFE6'),
                                    pen=pg.mkPen(COL_BORDER))
-        self.plot_widget.setMinimumHeight(180)
+        self.plot_widget.setMinimumHeight(100)
         self.curve_v = self.plot_widget.plot(
             pen=pg.mkPen(COL_ACCENT, width=2.6), name="Voltage (V)")
         self.curve_i = self.plot_widget.plot(
@@ -499,7 +662,7 @@ class RecellDashboard(QMainWindow):
         self.log_console = QPlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setFont(QFont("JetBrains Mono", 9))
-        self.log_console.setMinimumHeight(140)
+        self.log_console.setMinimumHeight(80)
         log_card.body.addWidget(self.log_console)
         col.addWidget(log_card, stretch=2)
 
@@ -522,6 +685,12 @@ class RecellDashboard(QMainWindow):
         self.update_status(dict(self.master.status))
 
     # ----- ACTIONS ----------------------------------------------------------
+    def _open_serial_config(self):
+        dlg = SerialConfigDialog(self.master, parent=self)
+        dlg.exec_()
+        # Refresh pill setelah dialog ditutup
+        self.update_status(dict(self.master.status))
+
     def trigger_cycle(self):
         if self.cycle_in_progress:
             self.log_msg("[!] Cycle already in progress.")
@@ -699,6 +868,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RECELL-AI Dashboard")
     parser.add_argument('--sim', action='store_true', help='Run without STM32 connected')
     parser.add_argument('--mock-ai', action='store_true', help='Run without YOLO/Camera')
+    parser.add_argument('--fullscreen', action='store_true', help='Launch in fullscreen mode')
     parser.add_argument('--smoke-test', metavar='OUTDIR',
                         help='Auto-run one cycle and save screenshots to OUTDIR, then quit')
     args, unknown = parser.parse_known_args()
@@ -708,6 +878,10 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
 
     window = RecellDashboard(simulate=args.sim, mock_ai=args.mock_ai)
+    if args.fullscreen:
+        screen_geo = app.primaryScreen().geometry()
+        window.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.X11BypassWindowManagerHint)
+        window.setGeometry(screen_geo)
     window.show()
 
     if args.smoke_test:

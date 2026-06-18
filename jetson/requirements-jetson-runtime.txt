@@ -21,6 +21,7 @@ ultralytics               # YOLOv8 (vision score) — depend pada torch (diinsta
 #                         # aksesibel via --system-site-packages). Install pip akan menimpa
 #                         # dengan versi CPU-only.
 xgboost                   # prediksi SoH dari fitur discharge
+scikit-learn              # dibutuhkan xgboost.XGBRegressor (sklearn API)
 pandas                    # bangun DataFrame fitur untuk XGBoost
 numpy                     # operasi array (dependency pandas/cv2/pyqtgraph)
 # PyQt5                   # JANGAN diinstall via pip — tidak ada wheel aarch64 di PyPI.

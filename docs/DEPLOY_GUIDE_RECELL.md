@@ -330,6 +330,10 @@ plus perintah `SET_CONFIG` & `JOG_FWD` yang dipakai panel kalibrasi.
 Saat trial, konveyor over-shoot sensor IR walau PWM 30. Kecepatan sekarang
 disetel **langsung dari layar tanpa re-flash**.
 
+Konveyor juga punya **soft-start** otomatis (PWM naik bertahap ~300 ms) agar belt
+tak menyentak & baterai tidak over-shoot sensor. Nilai aktif terlihat di kartu
+*Conveyor Control* (baris "Kalibrasi: speed … · pulse … µs").
+
 **Buka:** klik tombol **⚙ KALIBRASI** di kartu *Conveyor Control*, **atau** tekan **F12**.
 
 | Parameter | Arti | Saran |

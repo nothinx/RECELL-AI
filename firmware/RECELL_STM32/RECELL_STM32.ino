@@ -284,6 +284,14 @@ void startConveyorForward() {
   jogStopMs = 0; // gerakan normal membatalkan timer jog yang mungkin tersisa
   digitalWrite(PIN_CONVEYOR_EN, HIGH);
   analogWrite(PIN_CONVEYOR_LPWM, 0);
+  // Soft-start: naikkan PWM bertahap agar belt tak menyentak & baterai tidak
+  // over-shoot sensor IR. Durasi skala dgn target (~15ms/step, ~300ms @ PWM100).
+  // ponytail: ramp tetap; jadikan parameter hanya bila trial menuntut.
+  for (int pwm = 0; pwm < conveyorSpeed; pwm += 5) {
+    if (emergencyActive()) return;   // emergencyActive() sudah stopConveyor()
+    analogWrite(PIN_CONVEYOR_RPWM, pwm);
+    delay(15);
+  }
   analogWrite(PIN_CONVEYOR_RPWM, conveyorSpeed);
 }
 

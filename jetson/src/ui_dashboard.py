@@ -754,6 +754,11 @@ class RecellDashboard(QMainWindow):
         btn_row.addWidget(self.btn_stop, stretch=1)
         btn_row.addWidget(self.btn_calib, stretch=1)
         ctrl_card.body.addLayout(btn_row)
+
+        self.calib_lbl = QLabel("Kalibrasi:  —")
+        self.calib_lbl.setStyleSheet(f"color:{COL_MUTED}; font-size:11px; font-weight:600;")
+        ctrl_card.body.addWidget(self.calib_lbl)
+
         col.addWidget(ctrl_card)
 
         return col
@@ -883,6 +888,7 @@ class RecellDashboard(QMainWindow):
     def _on_master_ready(self):
         """Dipanggil di main thread setelah RecellMaster selesai diinisialisasi."""
         self.update_status(dict(self.master.status))
+        self._refresh_calib_label()
         self.grade_card.set_grade("STANDBY")
         self.update_progress(0, "Standby")
         self.btn_start.setEnabled(True)
@@ -923,6 +929,14 @@ class RecellDashboard(QMainWindow):
         if self.master is None:
             return
         CalibrationDialog(self.master, parent=self).exec_()
+        self._refresh_calib_label()
+
+    def _refresh_calib_label(self):
+        if self.master is None:
+            return
+        c = self.master.calibration
+        self.calib_lbl.setText(
+            f"Kalibrasi:  speed {c.get('conveyor_speed')}  ·  pulse {c.get('step_pulse_us')} µs")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F12:

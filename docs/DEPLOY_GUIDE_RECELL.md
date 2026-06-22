@@ -25,7 +25,7 @@ Mesin satu-satunya yang sesekali online adalah **laptop Windows** Anda → berpe
 > ```bash
 > bash laptop/prepare.sh
 > ```
-> Ikuti instruksi unduh manual torch/torchvision dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`.
+> Ikuti instruksi unduh manual torch/torchvision dari `https://pypi.jetson-ai-lab.io/jp6/cu126`.
 
 Setelah `wheelhouse/` lengkap, seluruh deploy bisa satu perintah dari laptop (Git Bash / Linux / macOS):
 
@@ -107,7 +107,7 @@ Ini mengambil wheel aarch64 untuk: `ultralytics`, `opencv-python-headless`, `xgb
 `torch`/`torchvision`/`onnxruntime-gpu` **tidak** ada di PyPI sebagai build CUDA Jetson.
 Ambil dari index **jetson-ai-lab** (cocokkan dengan JetPack 6 / CUDA 12.6 — `jp6/cu126`):
 
-- Buka di browser laptop: `https://pypi.jetson-ai-lab.dev/jp6/cu126`
+- Buka di browser laptop: `https://pypi.jetson-ai-lab.io/jp6/cu126`
 - Unduh file `.whl` untuk (pilih yang `cp310` / aarch64), simpan ke folder `wheelhouse/`:
   - **torch**
   - **torchvision**
@@ -204,8 +204,33 @@ yolo export model=models/weights/best.pt format=engine device=0 half=True imgsz=
 ```
 
 Jika `yolo export` error dengan pesan "No matching distribution" untuk onnx/onnxruntime-gpu:
-kembali ke laptop, unduh wheel yang kurang dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`,
+kembali ke laptop, unduh wheel yang kurang dari `https://pypi.jetson-ai-lab.io/jp6/cu126`,
 transfer ke `wheelhouse/`, lalu jalankan `pip install --no-index --find-links=./wheelhouse onnx onnxslim onnxruntime-gpu` di Jetson.
+
+### ⚠️ PENTING: index cu126 butuh JetPack 6.2 (CUDA 12.6 + cuDNN 9)
+
+Wheel `cu126` (torch ≥2.8) butuh **CUDA 12.6 + cuDNN 9**. Bila Jetson masih **JetPack 6.0**
+(CUDA 12.2 + cuDNN 8.9), torch cu126 gagal import: `libcudnn.so.9: cannot open ...`. Index
+`cu122` lama sudah **dihapus** dari jetson-ai-lab. Jadi: **upgrade ke JetPack 6.2 dulu**, lalu
+pip cu126 jalan mulus. (Jangan pasang torch generik PyPI `+cu130` — beda CUDA major, GPU mati.)
+
+**Upgrade JetPack 6.0 → 6.2** (perlu internet, listrik stabil, free disk ≥ 8 GB):
+```bash
+sudo systemctl stop recell
+df -h /                                  # cek ruang
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install -y nvidia-jetpack
+sudo reboot
+# Setelah reboot, verifikasi:
+cat /etc/nv_tegra_release                # R36 REVISION: 4.x
+nvcc --version                           # CUDA 12.6
+# Pasang stack GPU:
+source ~/RECELL-AI/venv/bin/activate
+pip uninstall -y torch torchvision
+pip install --no-cache-dir torch torchvision --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+pip install --no-cache-dir opencv-python-headless
+python -c "import torch; print(torch.cuda.is_available())"   # -> True
+```
 
 ### Autostart saat boot (produksi)
 **`setup.sh` sudah memasang & meng-enable service ini otomatis** (lihat §0). Unit yang
@@ -301,8 +326,8 @@ Indikator status (pill di header) harus menyala: **CAMERA**, **STM32**, **YOLO**
 |---|---|
 | `pip ... No matching distribution` saat offline install | Wheel paket itu tidak ada di `wheelhouse/`. Ulangi Tahap 1 untuk paket tsb (cek nama & versi aarch64/cp310), atau ambil dari jetson-ai-lab. |
 | YOLO load lambat (delay 10-30 detik) di Jetson | ultralytics telemetry masih mencoba koneksi. Jalankan: `source venv/bin/activate && python -c "from ultralytics import settings; settings.update({'sync': False})"` |
-| `yolo export` error saat konversi TensorRT | onnx/onnxslim/onnxruntime-gpu tidak ada di `wheelhouse/`. Unduh dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`, transfer, `pip install --no-index --find-links=./wheelhouse onnx onnxslim onnxruntime-gpu`. |
-| `torch.cuda.is_available()` → `False` / export error `Invalid CUDA 'device=0'` / `driver ... too old (12020)` | Wheel torch generik (mis. `+cu130`) tak cocok driver Jetson → GPU mati → inferensi CPU (LAMBAT) & export TensorRT gagal. Fix: `pip uninstall -y torch torchvision` lalu `pip install torch torchvision --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126` (sesuaikan jp6/cu126 dgn JetPack; cek `cat /etc/nv_tegra_release`). Verifikasi `python -c "import torch;print(torch.cuda.is_available())"` → `True`. |
+| `yolo export` error saat konversi TensorRT | onnx/onnxslim/onnxruntime-gpu tidak ada di `wheelhouse/`. Unduh dari `https://pypi.jetson-ai-lab.io/jp6/cu126`, transfer, `pip install --no-index --find-links=./wheelhouse onnx onnxslim onnxruntime-gpu`. |
+| `torch.cuda.is_available()` → `False` / export error `Invalid CUDA 'device=0'` / `driver ... too old (12020)` | Wheel torch generik (mis. `+cu130`) tak cocok driver Jetson → GPU mati → inferensi CPU (LAMBAT) & export TensorRT gagal. Fix: `pip uninstall -y torch torchvision` lalu `pip install torch torchvision --index-url https://pypi.jetson-ai-lab.io/jp6/cu126` (sesuaikan jp6/cu126 dgn JetPack; cek `cat /etc/nv_tegra_release`). Verifikasi `python -c "import torch;print(torch.cuda.is_available())"` → `True`. |
 | STM32 pill **OFFLINE** | Cek port ada (`ls /dev/ttyACM* /dev/ttyUSB*`); STM32 biasanya `ttyACM0` (auto-deteksi). Pastikan user di grup `dialout` (`sudo usermod -aG dialout $USER`, lalu re-login). Atau klik pill STM32 → pilih port manual. |
 | Kamera/YOLO terasa delay/lag | Sudah dioptimasi (imgsz 320, buffer 1, capture 640×480). Masih berat? Export TensorRT engine (`best.engine`, lihat Bagian 4) — jauh lebih cepat di Jetson. Atau turunkan `YOLO_IMGSZ` di `main.py`. |
 | Vision cuma deteksi 1 kelas (mis. SOBEK) | Isu model/training (kelas tak seimbang atau beda kondisi kamera vs data latih), bukan bug kode. Coba ubah `YOLO_CONF` di `main.py`; solusi tuntas = latih ulang dgn data seimbang & kondisi kamera sama. |

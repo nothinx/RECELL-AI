@@ -23,7 +23,7 @@ if not torch.cuda.is_available():
     print(f"[ERR] PyTorch TIDAK melihat GPU (torch {torch.__version__}, cuda.is_available()=False).")
     print("      Wheel torch salah untuk Jetson. Perbaiki dulu:")
     print("        pip uninstall -y torch torchvision")
-    print("        pip install torch torchvision --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126")
+    print("        pip install torch torchvision --index-url https://pypi.jetson-ai-lab.io/jp6/cu126")
     print("      (sesuaikan jp6/cu126 dgn JetPack-mu; cek: cat /etc/nv_tegra_release)")
     print("      Verifikasi: python -c \"import torch;print(torch.cuda.is_available())\" -> True")
     sys.exit(2)

@@ -46,7 +46,7 @@ bash setup.sh --online
 
 Skrip ini otomatis:
 1. Membuat venv `--system-site-packages` (PyQt5 + OpenCV CUDA dari sistem JetPack)
-2. Install `torch` + `torchvision` build CUDA dari index NVIDIA (`pypi.jetson-ai-lab.dev`)
+2. Install `torch` + `torchvision` build CUDA dari index NVIDIA (`pypi.jetson-ai-lab.io`)
 3. Install semua dependency runtime (`ultralytics`, `xgboost`, `pandas`, dll)
 4. Install ONNX export deps (`onnx`, `onnxslim`, `onnxruntime-gpu`)
 5. Matikan ultralytics telemetry (tidak ada HTTP call saat runtime)
@@ -115,11 +115,11 @@ Firmware: `firmware/RECELL_STM32/RECELL_STM32.ino`
 
 | Gejala | Solusi |
 |---|---|
-| `torch.cuda.is_available()` → `False` | torch terinstall dari PyPI biasa (CPU). Cek: `pip show torch` → versi harus mengandung `+cu` atau `jetson`. Install ulang: `pip install torch torchvision --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126` |
+| `torch.cuda.is_available()` → `False` | torch terinstall dari PyPI biasa (CPU). Cek: `pip show torch` → versi harus mengandung `+cu` atau `jetson`. Install ulang: `pip install torch torchvision --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126` |
 | STM32 **OFFLINE** di dashboard | `ls /dev/ttyUSB*` — pastikan ada. Cek user di grup dialout: `groups` → bila tidak ada, `sudo usermod -aG dialout $USER` lalu re-login |
 | GUI tidak muncul saat boot | Pastikan auto-login aktif di Settings → Users. Cek: `sudo systemctl status recell` |
 | YOLO load lama (>10 detik) | Matikan telemetry: `source venv/bin/activate && python -c "from ultralytics import settings; settings.update({'sync': False})"` |
-| `yolo export` gagal | `pip install onnx onnxslim onnxruntime-gpu --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126` |
+| `yolo export` gagal | `pip install onnx onnxslim onnxruntime-gpu --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126` |
 | Kamera tidak terdeteksi | `ls /dev/video*` — coba index lain: `cv2.VideoCapture(1)` di `main.py` |
 
 ---
@@ -128,6 +128,6 @@ Firmware: `firmware/RECELL_STM32/RECELL_STM32.ino`
 
 | Paket | Sumber |
 |---|---|
-| `torch`, `torchvision`, `onnxruntime-gpu` | `pypi.jetson-ai-lab.dev` (build CUDA Jetson) |
+| `torch`, `torchvision`, `onnxruntime-gpu` | `pypi.jetson-ai-lab.io` (build CUDA Jetson) |
 | `PyQt5`, `cv2` (OpenCV) | Sistem JetPack via `--system-site-packages` |
 | Sisa (`ultralytics`, `xgboost`, `pandas`, dll) | PyPI biasa |

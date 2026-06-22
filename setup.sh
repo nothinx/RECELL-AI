@@ -51,7 +51,7 @@ source venv/bin/activate
 echo "[*] Install torch & torchvision (CUDA Jetson)..."
 if $ONLINE; then
   pip install torch torchvision \
-    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
+    --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126
 else
   if ls "$WHEELHOUSE"/pip-*.whl >/dev/null 2>&1; then
     pip install --no-index --find-links="$WHEELHOUSE" --upgrade pip
@@ -76,7 +76,7 @@ python -c "from ultralytics import settings; settings.update({'sync': False})" |
 echo "[*] Install ONNX export deps (untuk konversi TensorRT)..."
 if $ONLINE; then
   pip install onnx "onnxslim>=0.1.5" onnxruntime-gpu \
-    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 2>/dev/null && \
+    --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 2>/dev/null && \
     echo "    + onnx, onnxslim, onnxruntime-gpu terinstall." || \
     echo "    [INFO] onnxruntime-gpu tidak tersedia — onnx & onnxslim saja (cukup untuk export)."
 else

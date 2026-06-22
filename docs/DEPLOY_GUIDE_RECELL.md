@@ -338,7 +338,7 @@ disetel **langsung dari layar tanpa re-flash**.
 | **Stepper pulse (µs)** | Jeda pulsa stepper. **Makin besar = makin pelan.** | Default **50**. Naikkan bila stepper terlalu cepat/kasar. |
 
 Tombol:
-- **▶ Jog Forward / ■ Stop** — uji jalan konveyor dengan nilai yang sedang diisi (tanpa siklus penuh). Pakai untuk cari kecepatan pas.
+- **▶ Jog Forward / ■ Stop** — uji jalan konveyor dengan nilai yang sedang diisi (tanpa siklus penuh). Pakai untuk cari kecepatan pas. Jog otomatis berhenti setelah 10 detik bila Stop lupa ditekan.
 - **Apply (live)** — kirim ke STM32 sekarang, belum disimpan.
 - **Simpan & Tutup** — kirim **dan** simpan ke `jetson/calibration.json`.
 

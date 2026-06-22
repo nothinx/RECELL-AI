@@ -399,6 +399,14 @@ class RecellMaster:
                         self.log_msg("[STM32] STEP TIMEOUT — firmware aborted a step. Aborting cycle.")
                         self.abort_cycle = True
                         self.wait_flag = False
+                    elif data.get("status") == "CONFIG_OK":
+                        self.log_msg(f"[STM32] Calibration applied: speed={data.get('volt')} pulse={data.get('curr')}")
+                    elif data.get("status") == "JOGGING":
+                        self.log_msg("[STM32] Conveyor jogging (manual stop / 10 s auto-stop).")
+                    elif data.get("status") == "BOOT_OK":
+                        # Board (re)booted — re-push calibration so it survives a reset.
+                        self.send_command("SET_CONFIG", self.calibration)
+                        self.log_msg(f"[STM32] Boot detected — re-pushed calibration: {self.calibration}")
                 except Exception:
                     pass
             time.sleep(0.01)

@@ -62,6 +62,7 @@ const uint16_t DAC_LOAD_VALUE    = 4095;  // beban maksimal
 const unsigned long END_OF_LINE_MS = 5000;
 const unsigned long STEPPER_TIMEOUT_MS = 10000; // stall guard: limit tak kunjung kena
 const unsigned long PROX_TIMEOUT_MS    = 25000; // guard: IR tak terdeteksi (baterai nyangkut)
+const unsigned long JOG_TIMEOUT_MS     = 10000; // auto-stop jog bila operator lupa Stop
 
 // Arah DIR: LOW = maju ke limit, HIGH = mundur ke home.
 const int DIR_FORWARD = LOW;
@@ -70,6 +71,7 @@ const int DIR_HOME    = HIGH;
 enum SystemState { STATE_IDLE, STATE_WAIT_PROX_1, STATE_WAIT_PROX_2, STATE_EMERGENCY };
 SystemState currentState = STATE_IDLE;
 unsigned long waitStartMs = 0; // kapan masuk STATE_WAIT_PROX_* (untuk timeout)
+unsigned long jogStopMs   = 0; // !=0 -> auto-stop konveyor jog pada waktu ini
 
 bool inaReady = false, mlxReady = false, dacReady = false;
 
@@ -121,6 +123,12 @@ void initSensors() {
 // ==========================================================================
 void loop() {
   emergencyActive(); // deteksi E-stop fisik real-time
+
+  // Auto-stop jog: pengaman bila konveyor di-jog lalu Stop tak ditekan.
+  if (jogStopMs && millis() > jogStopMs) {
+    stopConveyor();              // juga me-reset jogStopMs
+    sendTelemetry(0, 0, "STOPPED");
+  }
 
   if (Serial.available() > 0) {
     String incomingStr = Serial.readStringUntil('\n');
@@ -187,8 +195,10 @@ void processCommand(String jsonStr) {
     sendTelemetry(conveyorSpeed, stepPulseUs, "CONFIG_OK");
   }
   else if (cmd == "JOG_FWD") {
-    // Jalankan konveyor maju terus utk uji kecepatan saat setup (stop manual).
+    // Jalankan konveyor maju utk uji kecepatan saat setup. Auto-stop setelah
+    // JOG_TIMEOUT_MS sebagai pengaman bila operator lupa menekan Stop.
     startConveyorForward();
+    jogStopMs = millis() + JOG_TIMEOUT_MS;
     sendTelemetry(conveyorSpeed, 0, "JOGGING");
   }
   else if (cmd == "MOVE_TO_PROX_1") {
@@ -271,12 +281,14 @@ void runMeasurement() {
 // ==========================================================================
 // AKTUATOR
 void startConveyorForward() {
+  jogStopMs = 0; // gerakan normal membatalkan timer jog yang mungkin tersisa
   digitalWrite(PIN_CONVEYOR_EN, HIGH);
   analogWrite(PIN_CONVEYOR_LPWM, 0);
   analogWrite(PIN_CONVEYOR_RPWM, conveyorSpeed);
 }
 
 void stopConveyor() {
+  jogStopMs = 0;
   analogWrite(PIN_CONVEYOR_RPWM, 0);
   analogWrite(PIN_CONVEYOR_LPWM, 0);
   digitalWrite(PIN_CONVEYOR_EN, LOW);

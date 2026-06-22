@@ -190,12 +190,17 @@ pip install --no-index --find-links=./wheelhouse -r jetson/requirements-jetson-r
 > `onnx`, `onnxslim`, dan `onnxruntime-gpu` sudah ada di `wheelhouse/` dan sudah terinstall
 > oleh `setup.sh`. Bila belum, `yolo export` akan mencoba mengunduh dari internet dan **gagal**.
 
-Untuk inferensi cepat di Jetson, ubah `best.pt` → `best.engine` (memakai ultralytics lokal):
+Untuk inferensi cepat di Jetson, ubah `best.pt` → `best.engine`. **Cara mudah (1 perintah):**
+```bash
+bash ~/RECELL-AI/jetson/scripts/export_tensorrt.sh
+```
+Skrip ini aktifkan venv, export `imgsz=320 half=True` (cocok dgn inferensi `main.py`), dan
+verifikasi hasil. Manual setara:
 ```bash
 source venv/bin/activate
 cd ~/RECELL-AI/jetson
-yolo export model=models/weights/best.pt format=engine device=0
-# hasil best.engine -> letakkan di models/weights/ ; main.py otomatis memilihnya bila ada
+yolo export model=models/weights/best.pt format=engine device=0 half=True imgsz=320
+# hasil best.engine -> models/weights/ ; main.py otomatis memilihnya bila ada
 ```
 
 Jika `yolo export` error dengan pesan "No matching distribution" untuk onnx/onnxruntime-gpu:

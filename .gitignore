@@ -31,6 +31,3 @@ data/
 
 # Secret per-device passport signing key (auto-generated, never commit)
 jetson/config/passport_key.txt
-
-# Per-machine motion calibration (tuned on each device, do not commit)
-jetson/calibration.json

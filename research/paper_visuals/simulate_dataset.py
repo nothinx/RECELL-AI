@@ -32,42 +32,35 @@ DEFECT_POOL = ["rust", "dent", "major_dent", "leaking"]
 
 
 def sample_battery(idx, rng):
-    """Return (true_soh, true_grade, has_severe_defect, defects)."""
-    r = rng.random()
-    if r < 0.45:
-        true_soh = rng.uniform(85, 98)
-        cohort = "A"
-    elif r < 0.78:
-        true_soh = rng.uniform(62, 84)
-        cohort = "B"
-    else:
-        true_soh = rng.uniform(28, 58)
-        cohort = "R"
+    """Sample the TRUE latent condition of a battery.
 
-    # Vision: mostly correlated with cohort, with controlled outliers
-    if cohort == "A":
-        vision_score = rng.uniform(0.85, 1.0)
-        defects = []
-    elif cohort == "B":
-        vision_score = rng.uniform(0.55, 0.85)
+    Returns (true_soh, true_vision, defects). The cohort ranges deliberately
+    straddle the decision thresholds so that measurement noise produces a
+    realistic (not perfect) confusion matrix. Ground-truth grade and predicted
+    grade are derived later from the *true* vs *measured* values respectively.
+    """
+    r = rng.random()
+    if r < 0.42:        # healthy population
+        true_soh = rng.uniform(80, 99)
+        true_vision = rng.uniform(0.78, 1.0)
+        defects = rng.choice([[], [], [], ["rust"]])
+    elif r < 0.74:      # mid-life population
+        true_soh = rng.uniform(58, 85)
+        true_vision = rng.uniform(0.45, 0.86)
         defects = rng.choice([[], ["rust"], ["dent"], ["rust", "dent"]])
-    else:
-        vision_score = rng.uniform(0.0, 0.45)
+    else:               # end-of-life population
+        true_soh = rng.uniform(25, 62)
+        true_vision = rng.uniform(0.05, 0.55)
         defects = rng.choice([["rust"], ["dent", "rust"], ["major_dent"], ["leaking"]])
 
-    # Inject ~12% fusion-critical cases
-    if rng.random() < 0.12:
-        if cohort == "A":
-            # Electrically healthy but visually compromised → expect Grade R
-            vision_score = rng.uniform(0.15, 0.35)
-            defects = rng.choice([["leaking"], ["major_dent"], ["leaking", "rust"]])
-            cohort = "R"
-        elif cohort == "R":
-            # Visually clean but electrically dead → still Grade R, harder for vision-only
-            vision_score = rng.uniform(0.8, 0.95)
-            defects = []
+    # ~8% fusion-critical cases: electrically healthy yet physically unsafe
+    # (leaking / major dent). These are the points only a multimodal system
+    # catches — they are genuine ground-truth Grade R.
+    if rng.random() < 0.08 and true_soh > 75:
+        true_vision = rng.uniform(0.08, 0.32)
+        defects = rng.choice([["leaking"], ["major_dent"], ["leaking", "rust"]])
 
-    return true_soh, cohort, vision_score, defects
+    return true_soh, true_vision, defects
 
 
 def grade_from_rules(soh, vision_score):
@@ -112,25 +105,28 @@ def simulate(n_batteries, output_dir, seed):
         dw = csv.writer(df); dw.writerow(DISCHARGE_COLUMNS)
 
         for i in range(n_batteries):
-            true_soh, true_grade, vision_score, defects = sample_battery(i, rng)
+            true_soh, true_vision, defects = sample_battery(i, rng)
 
-            # Electrical derivations from "true" SoH
-            v_resting = 4.18 - (100 - true_soh) * 0.004 + rng.uniform(-0.015, 0.015)
-            internal_r = 0.05 + (100 - true_soh) * 0.0040 + rng.uniform(-0.008, 0.008)
+            # Electrical derivations from "true" SoH (physical scatter retained
+            # so internal_R vs SoH correlation is strong but not perfect, r~-0.94)
+            v_resting = 4.18 - (100 - true_soh) * 0.004 + rng.uniform(-0.018, 0.018)
+            internal_r = 0.05 + (100 - true_soh) * 0.0040 + rng.gauss(0, 0.018)
+            internal_r = max(0.03, internal_r)
             v_drop = internal_r * current_load
             v_loaded = v_resting - v_drop
             temp_pre = 25.0 + rng.uniform(-1.0, 1.0)
             temp_delta = 0.4 + (100 - true_soh) * 0.045 + rng.uniform(-0.15, 0.15)
             temp_post = temp_pre + temp_delta
 
-            # XGBoost prediction noise (~3% RMSE)
-            soh_predicted = max(0.0, min(100.0, true_soh + rng.gauss(0, 2.8)))
+            # ---- MEASURED values seen by the AI models ----
+            # XGBoost SoH estimate: ~2.2% RMSE (consistent with NASA-dataset lit.)
+            soh_predicted = max(0.0, min(100.0, true_soh + rng.gauss(0, 2.2)))
+            # YOLOv8 vision score: noisier modality (~mAP 0.90) -> drives most errors
+            vision_score = max(0.0, min(1.0, true_vision + rng.gauss(0, 0.065)))
 
+            # Ground truth from the TRUE condition; prediction from MEASURED values.
+            grade_ground_truth = grade_from_rules(true_soh, true_vision)
             grade_predicted = grade_from_rules(soh_predicted, vision_score)
-            grade_ground_truth = true_grade
-            # ~7% labeler/edge-case noise on ground truth boundary
-            if rng.random() < 0.07 and grade_predicted != grade_ground_truth:
-                grade_ground_truth = grade_predicted
 
             grade_counter[grade_predicted] += 1
 

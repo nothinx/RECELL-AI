@@ -32,6 +32,13 @@ BAUD_RATE = 115200
 YOLO_ENGINE_PATH = MODELS_DIR / "weights" / "best.engine"   # preferred on Jetson
 YOLO_PT_PATH = MODELS_DIR / "weights" / "best.pt"           # fallback (dev / non-Jetson)
 XGB_MODEL_PATH = MODELS_DIR / "weights" / "soh_xgb_model.json"
+CALIB_PATH = BASE_DIR / "calibration.json"
+
+# Hardware motion defaults. Conveyor lowered after the trial showed it
+# over-shooting the IR sensor even at PWM 30. Tune live via the F12 / on-screen
+# calibration panel; values persist to calibration.json and are pushed to the
+# STM32 on every connect.
+DEFAULT_CALIBRATION = {"conveyor_speed": 25, "step_pulse_us": 50}
 
 # Map YOLO class label -> (delta to vision_score, is_critical)
 # Classes from best.pt: KARAT (rust), SEHAT (healthy), SOBEK (torn wrapper)
@@ -80,6 +87,7 @@ class RecellMaster:
 
         self._serial_lock = threading.Lock()        # #5: guard serial r/w across threads
         self._camera_restart_requested = False      # #8: set by restart_camera()
+        self.calibration = self._load_calibration()
 
         self.log_msg("=== RECELL-AI Master Controller ===")
         self.log_msg(f"Simulation Mode : {self.simulate}")
@@ -144,6 +152,9 @@ class RecellMaster:
                 self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
                 self.log_msg(f"[Comm] Connected to STM32 on {SERIAL_PORT}")
                 self.status["serial"] = "online"
+                time.sleep(2)  # let the board finish booting before config
+                self.send_command("SET_CONFIG", self.calibration)
+                self.log_msg(f"[Comm] Pushed calibration: {self.calibration}")
             except Exception as e:
                 self.log_msg(f"[Comm] Error connecting to Serial: {e}. Falling back to SIMULATION.")
                 self.simulate = True
@@ -181,6 +192,9 @@ class RecellMaster:
                 self.simulate = True
                 self.status["serial"] = "offline"
                 self.log_msg(f"[Comm] Failed to connect to {port}: {e}")
+        # Push calibration outside the lock (send_command re-acquires it).
+        if self.status["serial"] == "online":
+            self.send_command("SET_CONFIG", self.calibration)
         self._notify_status()
         return self.status["serial"] == "online"
 
@@ -403,6 +417,40 @@ class RecellMaster:
             with self._serial_lock:
                 if self.ser:
                     self.ser.write(payload.encode())
+
+    # ----- CALIBRATION ------------------------------------------------------
+    def _load_calibration(self):
+        cfg = dict(DEFAULT_CALIBRATION)
+        try:
+            with open(CALIB_PATH) as f:
+                cfg.update({k: int(v) for k, v in json.load(f).items()
+                            if k in DEFAULT_CALIBRATION})
+        except Exception:
+            pass  # missing/invalid file -> defaults
+        return cfg
+
+    def set_calibration(self, conveyor_speed, step_pulse_us, save=True):
+        """Update motion config, push it to the STM32, and optionally persist."""
+        self.calibration = {
+            "conveyor_speed": max(0, min(255, int(conveyor_speed))),
+            "step_pulse_us": max(20, min(5000, int(step_pulse_us))),
+        }
+        self.send_command("SET_CONFIG", self.calibration)
+        if save:
+            try:
+                with open(CALIB_PATH, "w") as f:
+                    json.dump(self.calibration, f, indent=2)
+                self.log_msg(f"[Calib] Saved {self.calibration} -> {CALIB_PATH}")
+            except Exception as e:
+                self.log_msg(f"[Calib] Could not save calibration: {e}")
+        return self.calibration
+
+    def jog_forward(self):
+        """Run the conveyor forward continuously (setup speed test)."""
+        self.send_command("JOG_FWD")
+
+    def stop_conveyor(self):
+        self.send_command("STOP_CONVEYOR")
 
     def _simulate_measurement(self):
         """Produce a realistic measurement and a short discharge curve in --sim mode.

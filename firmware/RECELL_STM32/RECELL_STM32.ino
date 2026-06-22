@@ -48,8 +48,11 @@ const int PIN_I2C_SDA       = PB7;
 const int PIN_I2C_SCL       = PB6;
 
 // --- PARAMETER ---
-const int  CONVEYOR_SPEED        = 100;   // PWM 0-255 (produksi)
-const int  STEPPER_PULSE_US      = 50;    // setengah-pulsa (us)
+// conveyorSpeed & stepPulseUs bisa diubah saat runtime via SET_CONFIG (panel
+// kalibrasi F12 / tombol di layar) tanpa re-flash. Default konveyor diturunkan
+// 100 -> 25 karena pada trial PWM 30 pun baterai over-shoot sensor IR.
+int  conveyorSpeed               = 25;    // PWM 0-255
+int  stepPulseUs                 = 50;    // setengah-pulsa stepper (us); makin besar makin pelan
 const int  STEPPER_REARM_STEPS   = 40;    // limit harus LEPAS stabil sekian step
 const int  LIMIT_CONFIRM_SAMPLES = 4;     // sampel LOW beruntun utk konfirmasi
 const int  LIMIT_CONFIRM_US      = 200;   // jeda antar sampel konfirmasi
@@ -175,6 +178,19 @@ void processCommand(String jsonStr) {
     currentState = STATE_IDLE;
     sendTelemetry(0, 0, "RESET_OK");
   }
+  else if (cmd == "SET_CONFIG") {
+    // Panel kalibrasi mengirim kecepatan konveyor & pulsa stepper.
+    if (doc.containsKey("conveyor_speed"))
+      conveyorSpeed = constrain((int)doc["conveyor_speed"], 0, 255);
+    if (doc.containsKey("step_pulse_us"))
+      stepPulseUs = constrain((int)doc["step_pulse_us"], 20, 5000);
+    sendTelemetry(conveyorSpeed, stepPulseUs, "CONFIG_OK");
+  }
+  else if (cmd == "JOG_FWD") {
+    // Jalankan konveyor maju terus utk uji kecepatan saat setup (stop manual).
+    startConveyorForward();
+    sendTelemetry(conveyorSpeed, 0, "JOGGING");
+  }
   else if (cmd == "MOVE_TO_PROX_1") {
     startConveyorForward();
     waitStartMs = millis();
@@ -257,7 +273,7 @@ void runMeasurement() {
 void startConveyorForward() {
   digitalWrite(PIN_CONVEYOR_EN, HIGH);
   analogWrite(PIN_CONVEYOR_LPWM, 0);
-  analogWrite(PIN_CONVEYOR_RPWM, CONVEYOR_SPEED);
+  analogWrite(PIN_CONVEYOR_RPWM, conveyorSpeed);
 }
 
 void stopConveyor() {
@@ -312,8 +328,8 @@ bool moveStepperUntilLimit(int pinStep, int pinDir, int pinLimit, int dir) {
       if (armed && limitConfirmed(pinLimit)) return true;
     }
 
-    digitalWrite(pinStep, HIGH); delayMicroseconds(STEPPER_PULSE_US);
-    digitalWrite(pinStep, LOW);  delayMicroseconds(STEPPER_PULSE_US);
+    digitalWrite(pinStep, HIGH); delayMicroseconds(stepPulseUs);
+    digitalWrite(pinStep, LOW);  delayMicroseconds(stepPulseUs);
   }
 }
 

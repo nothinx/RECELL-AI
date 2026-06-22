@@ -301,6 +301,7 @@ Indikator status (pill di header) harus menyala: **CAMERA**, **STM32**, **YOLO**
 | Kamera tidak terdeteksi | `ls /dev/video*`; coba index lain di `cv2.VideoCapture(0)`; pastikan kamera USB terpasang. |
 | GUI tak muncul lewat SSH | Pakai NoMachine/Remote Desktop atau monitor HDMI — bukan SSH biasa. |
 | Stepper bergerak ke arah salah | Tukar `DIR_FORWARD`/`DIR_HOME` di `RECELL_STM32.ino`, atau verifikasi via `STEPPER_TEST`. |
+| Konveyor / alat bergerak terlalu cepat | Buka panel **Kalibrasi** (tombol ⚙ KALIBRASI di layar atau **F12**), turunkan *Conveyor speed*, tekan **Simpan & Tutup**. Lihat Bagian 9. |
 
 ---
 
@@ -310,3 +311,39 @@ Indikator status (pill di header) harus menyala: **CAMERA**, **STM32**, **YOLO**
   MQTT/cloud/FastAPI (tidak dipakai runtime).
 - **Training (mesin lain, online):** `jetson/requirements.txt` — lengkap (xgboost, sklearn, scipy,
   matplotlib, dll) untuk melatih YOLO/XGBoost. Tidak perlu di Jetson produksi.
+
+---
+
+## 9. Update versi baru + Panel Kalibrasi
+
+### 9.1 Update — TIDAK perlu install ulang
+Tidak ada *library* baru pada update kalibrasi ini, jadi `venv` lama tetap dipakai.
+```bash
+cd ~/RECELL-AI
+git pull                      # kode + model best.pt terbaru ikut otomatis
+```
+Yang **wajib** hanya **re-flash firmware STM32** (lihat Bagian 5), karena logika
+kecepatan motor diubah: `CONVEYOR_SPEED`/`STEPPER_PULSE_US` kini variabel runtime
+plus perintah `SET_CONFIG` & `JOG_FWD` yang dipakai panel kalibrasi.
+
+### 9.2 Panel Kalibrasi (setup kecepatan)
+Saat trial, konveyor over-shoot sensor IR walau PWM 30. Kecepatan sekarang
+disetel **langsung dari layar tanpa re-flash**.
+
+**Buka:** klik tombol **⚙ KALIBRASI** di kartu *Conveyor Control*, **atau** tekan **F12**.
+
+| Parameter | Arti | Saran |
+|---|---|---|
+| **Conveyor speed (PWM 0–255)** | Kecepatan motor konveyor BTS7960. | Mulai **25**, turunkan bila masih cepat. |
+| **Stepper pulse (µs)** | Jeda pulsa stepper. **Makin besar = makin pelan.** | Default **50**. Naikkan bila stepper terlalu cepat/kasar. |
+
+Tombol:
+- **▶ Jog Forward / ■ Stop** — uji jalan konveyor dengan nilai yang sedang diisi (tanpa siklus penuh). Pakai untuk cari kecepatan pas.
+- **Apply (live)** — kirim ke STM32 sekarang, belum disimpan.
+- **Simpan & Tutup** — kirim **dan** simpan ke `jetson/calibration.json`.
+
+### 9.3 Nilai tersimpan permanen (tanpa EEPROM)
+Nilai yang di-*Simpan* masuk ke `jetson/calibration.json` dan **otomatis dikirim
+ulang ke STM32 setiap program start / serial reconnect**. Jadi sekali kalibrasi,
+kecepatan tetap walau Jetson/alat di-*restart* — EEPROM di STM32 tidak diperlukan
+karena alat selalu dikendalikan Jetson.

@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QWidget, QFrame, QPlainTextEdit, QProgressBar, QSizePolicy, QGraphicsDropShadowEffect,
     QDialog, QComboBox, QSpinBox, QDialogButtonBox, QListWidget, QListWidgetItem,
+    QFormLayout,
 )
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QImage, QPixmap, QColor
@@ -458,6 +459,95 @@ class SerialConfigDialog(QDialog):
         self._refresh_status()
 
 
+# ----- CALIBRATION DIALOG ---------------------------------------------------
+class CalibrationDialog(QDialog):
+    """Setup panel to tune conveyor speed + stepper pulse without re-flashing.
+
+    Opened from the on-screen button or F12. Apply pushes live to the STM32;
+    Save also persists to calibration.json so it survives restarts.
+    """
+    def __init__(self, master, parent=None):
+        super().__init__(parent)
+        self.master = master
+        self.setWindowTitle("Kalibrasi — Setup Kecepatan")
+        self.setMinimumWidth(380)
+        self.setStyleSheet(f"""
+            QDialog {{ background:{COL_BG}; color:{COL_TEXT}; }}
+            QLabel  {{ color:{COL_TEXT}; }}
+            QSpinBox {{
+                background:{COL_SURFACE}; color:{COL_TEXT};
+                border:1px solid {COL_BORDER}; border-radius:6px; padding:6px 8px;
+                font-size:14px; font-weight:700; min-width:90px;
+            }}
+            QPushButton {{
+                border:none; border-radius:8px; padding:8px 16px;
+                font-weight:700; font-size:12px;
+            }}
+        """)
+
+        cal = master.calibration
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
+
+        hint = QLabel("Turunkan nilai jika alat bergerak terlalu cepat.")
+        hint.setStyleSheet(f"color:{COL_MUTED}; font-size:11px; font-weight:600;")
+        lay.addWidget(hint)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.spin_speed = QSpinBox()
+        self.spin_speed.setRange(0, 255)
+        self.spin_speed.setValue(int(cal.get("conveyor_speed", 25)))
+        self.spin_pulse = QSpinBox()
+        self.spin_pulse.setRange(20, 5000)
+        self.spin_pulse.setSingleStep(10)
+        self.spin_pulse.setValue(int(cal.get("step_pulse_us", 50)))
+        form.addRow(self._lbl("Conveyor speed (PWM 0–255)"), self.spin_speed)
+        form.addRow(self._lbl("Stepper pulse (µs, ↑ = pelan)"), self.spin_pulse)
+        lay.addLayout(form)
+
+        # Live jog test row
+        jog_row = QHBoxLayout()
+        btn_jog = QPushButton("▶ Jog Forward")
+        btn_jog.setStyleSheet(f"background:{COL_INFO}; color:white;")
+        btn_jog.clicked.connect(self._jog)
+        btn_jog_stop = QPushButton("■ Stop")
+        btn_jog_stop.setStyleSheet(f"background:{COL_ERROR}; color:white;")
+        btn_jog_stop.clicked.connect(master.stop_conveyor)
+        jog_row.addWidget(btn_jog)
+        jog_row.addWidget(btn_jog_stop)
+        lay.addLayout(jog_row)
+
+        # Action row
+        act_row = QHBoxLayout()
+        btn_apply = QPushButton("Apply (live)")
+        btn_apply.setStyleSheet(
+            f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};")
+        btn_apply.clicked.connect(lambda: self._apply(save=False))
+        btn_save = QPushButton("Simpan & Tutup")
+        btn_save.setStyleSheet(f"background:{COL_ACCENT}; color:white;")
+        btn_save.clicked.connect(lambda: (self._apply(save=True), self.accept()))
+        act_row.addStretch(1)
+        act_row.addWidget(btn_apply)
+        act_row.addWidget(btn_save)
+        lay.addLayout(act_row)
+
+    def _lbl(self, text):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:{COL_HEADING}; font-size:12px; font-weight:600;")
+        return l
+
+    def _jog(self):
+        # Apply current speed first so the jog reflects the value being tested.
+        self._apply(save=False)
+        self.master.jog_forward()
+
+    def _apply(self, save):
+        self.master.set_calibration(
+            self.spin_speed.value(), self.spin_pulse.value(), save=save)
+
+
 # ----- BRIDGE ---------------------------------------------------------------
 class UIBridge(QObject):
     frame_signal = pyqtSignal(np.ndarray)
@@ -651,8 +741,18 @@ class RecellDashboard(QMainWindow):
         self.btn_stop.setMinimumHeight(46)
         self.btn_stop.clicked.connect(self.trigger_stop)
 
+        self.btn_calib = QPushButton("⚙  KALIBRASI")
+        self.btn_calib.setMinimumHeight(46)
+        self.btn_calib.setToolTip("Buka panel kalibrasi / setup (F12)")
+        self.btn_calib.setStyleSheet(
+            f"background-color:{COL_SURFACE}; color:{COL_HEADING};"
+            f"border:1px solid {COL_BORDER};"
+        )
+        self.btn_calib.clicked.connect(self.open_calibration)
+
         btn_row.addWidget(self.btn_start, stretch=2)
         btn_row.addWidget(self.btn_stop, stretch=1)
+        btn_row.addWidget(self.btn_calib, stretch=1)
         ctrl_card.body.addLayout(btn_row)
         col.addWidget(ctrl_card)
 
@@ -818,6 +918,17 @@ class RecellDashboard(QMainWindow):
         dlg = SerialConfigDialog(self.master, parent=self)
         dlg.exec_()
         self.update_status(dict(self.master.status))
+
+    def open_calibration(self):
+        if self.master is None:
+            return
+        CalibrationDialog(self.master, parent=self).exec_()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F12:
+            self.open_calibration()
+        else:
+            super().keyPressEvent(event)
 
     def trigger_cycle(self):
         if self.master is None:

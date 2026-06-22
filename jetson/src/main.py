@@ -27,8 +27,17 @@ PASSPORT_DIR = DATA_DIR / "passports"
 LOG_DIR = DATA_DIR / "logs"
 
 # Default Configuration
-SERIAL_PORT = '/dev/ttyUSB0'
+# STM32 ber-USB CDC ('Serial') enumerasi sebagai /dev/ttyACM0 di Jetson, BUKAN
+# ttyUSB0 (itu untuk adapter FTDI/CH340). _pick_serial_port() auto-deteksi.
+SERIAL_PORT = '/dev/ttyACM0'
+SERIAL_FALLBACKS = ['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0', '/dev/ttyUSB1']
 BAUD_RATE = 115200
+
+# Vision realtime tuning. imgsz kecil = jauh lebih ringan/cepat di Jetson untuk
+# model .pt (untuk .engine ukuran sudah fix saat export). Naikkan bila akurasi
+# kurang, turunkan bila masih berat.
+YOLO_IMGSZ = 320
+YOLO_CONF = 0.25
 YOLO_ENGINE_PATH = MODELS_DIR / "weights" / "best.engine"   # preferred on Jetson
 YOLO_PT_PATH = MODELS_DIR / "weights" / "best.pt"           # fallback (dev / non-Jetson)
 XGB_MODEL_PATH = MODELS_DIR / "weights" / "soh_xgb_model.json"
@@ -149,8 +158,9 @@ class RecellMaster:
 
         if not self.simulate:
             try:
-                self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
-                self.log_msg(f"[Comm] Connected to STM32 on {SERIAL_PORT}")
+                port = self._pick_serial_port()
+                self.ser = serial.Serial(port, BAUD_RATE, timeout=0.1)
+                self.log_msg(f"[Comm] Connected to STM32 on {port}")
                 self.status["serial"] = "online"
                 time.sleep(2)  # let the board finish booting before config
                 self.send_command("SET_CONFIG", self.calibration)
@@ -173,6 +183,18 @@ class RecellMaster:
         """Return list of (port, description) for all detected serial devices."""
         from serial.tools import list_ports
         return [(p.device, p.description) for p in list_ports.comports()]
+
+    def _pick_serial_port(self):
+        """Pilih port STM32: utamakan ACM* yang benar-benar ada, lalu USB*."""
+        available = [dev for dev, _ in self.list_serial_ports()]
+        for cand in SERIAL_FALLBACKS:
+            if cand in available:
+                return cand
+        # ACM apa pun dulu (STM32 CDC), baru USB, baru default.
+        for dev in available:
+            if "ACM" in dev:
+                return dev
+        return available[0] if available else SERIAL_PORT
 
     def reconnect_serial(self, port, baud=115200):
         """Close existing serial connection and open a new one on *port*."""
@@ -257,20 +279,24 @@ class RecellMaster:
                 time.sleep(0.5)
             return
 
+        # Realtime: buffer 1 frame agar tidak menampilkan frame lama (sumber utama
+        # rasa "delay"); turunkan resolusi capture agar ringan.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
         self.status["camera"] = "online"
         self._notify_status()
-        self.log_msg("[Camera] Kamera aktif, memulai inferensi YOLO.")
+        self.log_msg(f"[Camera] Kamera aktif, inferensi YOLO (imgsz={YOLO_IMGSZ}, conf={YOLO_CONF}).")
 
-        FRAME_PERIOD = 0.04  # ~25 FPS cap
         try:
             while self.running and not self._camera_restart_requested:
-                t0 = time.time()
                 ret, frame = cap.read()
                 if not ret:
                     time.sleep(0.05)
                     continue
                 try:
-                    results = self.model(frame, verbose=False)
+                    results = self.model(frame, imgsz=YOLO_IMGSZ, conf=YOLO_CONF, verbose=False)
                     annotated_frame = results[0].plot()
                     self.latest_frame = annotated_frame.copy()
                     if 'on_frame' in self.ui_callbacks:
@@ -279,9 +305,9 @@ class RecellMaster:
                 except Exception as e:
                     self.log_msg(f"[Vision] inference error: {e}")
                     time.sleep(0.1)
-                elapsed = time.time() - t0
-                if elapsed < FRAME_PERIOD:
-                    time.sleep(FRAME_PERIOD - elapsed)
+                # Tanpa FPS cap buatan: inferensi sendiri yang menentukan laju.
+                # Yield singkat agar core tidak 100% saat inferensi sangat cepat.
+                time.sleep(0.001)
         finally:
             cap.release()
             if self._camera_restart_requested:

@@ -267,7 +267,8 @@ arduino-cli upload  --fqbn STMicroelectronics:stm32:GenF4:pnum=BLACKPILL_F411CE 
 
 ### 5.5 Pindah ke Jetson
 Cabut STM32 dari laptop, colok ke port USB **Jetson**. Kernel Jetson akan memetakannya sebagai
-`/dev/ttyUSB0` (atau `/dev/ttyACM0`). Pastikan cocok dengan `SERIAL_PORT` di `jetson/src/main.py`.
+**`/dev/ttyACM0`** (STM32 USB CDC; bukan `ttyUSB0` yang untuk adapter FTDI/CH340).
+`main.py` auto-deteksi ACM lalu USB, jadi biasanya tak perlu ubah `SERIAL_PORT`.
 
 ---
 
@@ -297,7 +298,9 @@ Indikator status (pill di header) harus menyala: **CAMERA**, **STM32**, **YOLO**
 | YOLO load lambat (delay 10-30 detik) di Jetson | ultralytics telemetry masih mencoba koneksi. Jalankan: `source venv/bin/activate && python -c "from ultralytics import settings; settings.update({'sync': False})"` |
 | `yolo export` error saat konversi TensorRT | onnx/onnxslim/onnxruntime-gpu tidak ada di `wheelhouse/`. Unduh dari `https://pypi.jetson-ai-lab.dev/jp6/cu126`, transfer, `pip install --no-index --find-links=./wheelhouse onnx onnxslim onnxruntime-gpu`. |
 | `torch.cuda.is_available()` → `False` | Wheel torch bukan build CUDA Jetson. Ganti dengan wheel dari `jetson-ai-lab.dev/jp6/cu126` yang cocok JetPack Anda. |
-| STM32 pill **OFFLINE** | Cek `/dev/ttyUSB0` ada (`ls /dev/ttyUSB*`); sesuaikan `SERIAL_PORT` di `main.py`; pastikan user di grup `dialout` (`sudo usermod -aG dialout $USER`, lalu re-login). |
+| STM32 pill **OFFLINE** | Cek port ada (`ls /dev/ttyACM* /dev/ttyUSB*`); STM32 biasanya `ttyACM0` (auto-deteksi). Pastikan user di grup `dialout` (`sudo usermod -aG dialout $USER`, lalu re-login). Atau klik pill STM32 → pilih port manual. |
+| Kamera/YOLO terasa delay/lag | Sudah dioptimasi (imgsz 320, buffer 1, capture 640×480). Masih berat? Export TensorRT engine (`best.engine`, lihat Bagian 4) — jauh lebih cepat di Jetson. Atau turunkan `YOLO_IMGSZ` di `main.py`. |
+| Vision cuma deteksi 1 kelas (mis. SOBEK) | Isu model/training (kelas tak seimbang atau beda kondisi kamera vs data latih), bukan bug kode. Coba ubah `YOLO_CONF` di `main.py`; solusi tuntas = latih ulang dgn data seimbang & kondisi kamera sama. |
 | Kamera tidak terdeteksi | `ls /dev/video*`; coba index lain di `cv2.VideoCapture(0)`; pastikan kamera USB terpasang. |
 | GUI tak muncul lewat SSH | Pakai NoMachine/Remote Desktop atau monitor HDMI — bukan SSH biasa. |
 | Stepper bergerak ke arah salah | Tukar `DIR_FORWARD`/`DIR_HOME` di `RECELL_STM32.ino`, atau verifikasi via `STEPPER_TEST`. |

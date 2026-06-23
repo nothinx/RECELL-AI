@@ -520,6 +520,7 @@ class CalibrationDialog(QDialog):
 
         self._mon = {}   # key -> (dot_label, value_label)
         self._spins = {}
+        self._active_jog = None   # tombol jog-ke-limit yang sedang jalan (1 gerak/waktu)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
@@ -674,10 +675,20 @@ class CalibrationDialog(QDialog):
 
         for which, title in (("drain", "Stepper Ukur"), ("sort", "Stepper Sorting")):
             lay.addWidget(self._section(title))
+            # Toggle ke-limit: klik = jalan; berhenti otomatis saat limit kena
+            # (firmware ber-arm, paham limit paralel) atau klik lagi / STOP.
+            trow = QHBoxLayout()
+            trow.addWidget(self._make_jog_toggle(which, "rev", "◀ Mundur ke limit"))
+            trow.addWidget(self._make_jog_toggle(which, "fwd", "▶ Maju ke limit"))
+            b_home = QPushButton("⌂ Ke home")
+            b_home.setStyleSheet(f"background:{COL_ACCENT}; color:white;")
+            b_home.clicked.connect(lambda _, w=which: self.master.home_stepper(w))
+            trow.addWidget(b_home)
+            lay.addLayout(trow)
+            # Jog mentah (abaikan limit) — isolasi motor dari sensor untuk diagnosa.
             lay.addLayout(self._btn_row([
-                ("◀ Jog mundur", COL_INFO, lambda w=which: self.master.jog_stepper(w, "rev", self.spin_jog.value())),
-                ("▶ Jog maju",   COL_INFO, lambda w=which: self.master.jog_stepper(w, "fwd", self.spin_jog.value())),
-                ("⌂ Ke home",    COL_ACCENT, lambda w=which: self.master.home_stepper(w)),
+                ("◀ mentah", COL_SURFACE_ALT, lambda w=which: self.master.jog_stepper(w, "rev", self.spin_jog.value())),
+                ("▶ mentah", COL_SURFACE_ALT, lambda w=which: self.master.jog_stepper(w, "fwd", self.spin_jog.value())),
             ]))
 
         lay.addWidget(self._section("Beban DAC"))
@@ -695,7 +706,46 @@ class CalibrationDialog(QDialog):
 
     def _stop_all(self):
         self.master.conveyor_manual("stop")
+        self.master.stop_stepper()
         self.master.dac_load(False)
+        if self._active_jog is not None:
+            self._reset_jog_btn(self._active_jog)
+
+    # ---- Jog-ke-limit toggle ----------------------------------------------
+    def _make_jog_toggle(self, which, direction, label):
+        b = QPushButton(label)
+        b.setStyleSheet(f"background:{COL_INFO}; color:white;")
+        b._jog = (which, direction, label)
+        b._running = False
+        b.clicked.connect(lambda _, btn=b: self._toggle_jog(btn))
+        return b
+
+    def _toggle_jog(self, btn):
+        if btn._running:                       # klik lagi -> stop
+            self.master.stop_stepper()
+            self._reset_jog_btn(btn)
+            return
+        if self._active_jog is not None:
+            return                             # satu gerak pada satu waktu (firmware blocking)
+        which, direction, _ = btn._jog
+        self.master.jog_to_limit(which, direction)
+        btn.setText("■ Berhenti")
+        btn.setStyleSheet(f"background:{COL_ERROR}; color:white;")
+        btn._running = True
+        self._active_jog = btn
+
+    def _reset_jog_btn(self, btn):
+        _, _, label = btn._jog
+        btn.setText(label)
+        btn.setStyleSheet(f"background:{COL_INFO}; color:white;")
+        btn._running = False
+        if self._active_jog is btn:
+            self._active_jog = None
+
+    def on_jog_end(self, status):
+        """Firmware lapor gerak selesai (limit/stop/timeout) -> balikkan toggle aktif."""
+        if self._active_jog is not None:
+            self._reset_jog_btn(self._active_jog)
 
     def _section(self, text):
         l = QLabel(text)
@@ -844,6 +894,7 @@ class UIBridge(QObject):
     discharge_signal = pyqtSignal(dict)
     status_signal = pyqtSignal(dict)
     diag_signal = pyqtSignal(dict)             # live diagnostic snapshot (panel)
+    jog_end_signal = pyqtSignal(str)           # jog-to-limit ended: LIMIT_HIT/JOG_STOPPED/STEP_TIMEOUT
     init_done_signal = pyqtSignal()
     passport_signal = pyqtSignal(str, str)   # (pdf_path, grade)
 
@@ -874,6 +925,7 @@ class RecellDashboard(QMainWindow):
         self.bridge.discharge_signal.connect(self.update_discharge)
         self.bridge.status_signal.connect(self.update_status)
         self.bridge.diag_signal.connect(self._on_diag)
+        self.bridge.jog_end_signal.connect(self._on_jog_end)
         self.bridge.init_done_signal.connect(self._on_master_ready)
         self._calib_dialog = None
         self.bridge.passport_signal.connect(self._on_passport_ready)
@@ -1174,6 +1226,7 @@ class RecellDashboard(QMainWindow):
             'on_status':           self.bridge.status_signal.emit,
             'on_passport':         self.bridge.passport_signal.emit,
             'on_diag':             self.bridge.diag_signal.emit,
+            'on_jog_end':          self.bridge.jog_end_signal.emit,
         }
 
         def _bg():
@@ -1260,6 +1313,7 @@ class RecellDashboard(QMainWindow):
         try:
             self._exec_dialog_on_top(dlg)
         finally:
+            self.master.stop_stepper()    # hentikan jog-ke-limit bila masih jalan
             self.master.stop_diag()
             self._calib_dialog = None
         self._refresh_calib_label()
@@ -1269,6 +1323,12 @@ class RecellDashboard(QMainWindow):
         dlg = self._calib_dialog
         if dlg is not None:
             dlg.update_monitor(data)
+
+    def _on_jog_end(self, status):
+        """Forward jog-to-limit end to the calibration dialog so it resets the toggle."""
+        dlg = self._calib_dialog
+        if dlg is not None:
+            dlg.on_jog_end(status)
 
     def open_stats(self):
         if self.master is None:

@@ -19,16 +19,20 @@ COMMANDS = [
     "MOVE_TO_PROX_2", "EJECT_A", "MOVE_TO_END", "STOP_CONVEYOR",
     # Panel diagnostik / kalibrasi (sesi 2026-06-23)
     "START_DIAG", "STOP_DIAG", "JOG_STEPPER", "HOME_STEPPER", "CONVEYOR", "DAC_LOAD",
+    # Jog ber-arm ke limit + stop (toggle panel Manual)
+    "JOG_TO_LIMIT", "STOP_STEPPER",
 ]
 # Status yang dipancarkan firmware (semua), dan subset yang ditindaklanjuti Jetson.
 STATUSES_EMITTED = [
     "BOOT_OK", "AT_PROX_1", "AT_PROX_2", "DISCHARGE_SAMPLE", "MEASUREMENT_DONE",
     "EJECTED_A", "DROPPED_B", "STOPPED", "RESET_OK", "EMERGENCY_STOP", "STEP_TIMEOUT",
     "DIAG", "HEARTBEAT", "DIAG_ON", "DIAG_OFF", "JOG_DONE", "HOME_DONE", "DAC_SET",
+    "LIMIT_HIT", "JOG_STOPPED",
 ]
 STATUSES_CONSUMED = [
     "MEASUREMENT_DONE", "DISCHARGE_SAMPLE", "AT_PROX_1", "AT_PROX_2",
     "EJECTED_A", "DROPPED_B", "EMERGENCY_STOP", "STEP_TIMEOUT", "DIAG", "HEARTBEAT",
+    "LIMIT_HIT", "JOG_STOPPED",
 ]
 MEASUREMENT_FIELDS = ["volt", "curr", "v_resting", "temp_pre", "temp_post", "temp_delta"]
 DISCHARGE_FIELDS = ["t_ms", "volt", "curr", "temp"]

@@ -532,6 +532,12 @@ class RecellMaster:
                         self.log_msg("[STM32] STEP TIMEOUT — firmware aborted a step. Aborting cycle.")
                         self.abort_cycle = True
                         self.wait_flag = False
+                        if "on_jog_end" in self.ui_callbacks:
+                            self.ui_callbacks["on_jog_end"]("STEP_TIMEOUT")
+                    elif data.get("status") in ("LIMIT_HIT", "JOG_STOPPED"):
+                        self.log_msg(f"[STM32] {data.get('status')}")
+                        if "on_jog_end" in self.ui_callbacks:
+                            self.ui_callbacks["on_jog_end"](data.get("status"))
                     elif data.get("status") == "CONFIG_OK":
                         self.log_msg(f"[STM32] Calibration applied: speed={data.get('volt')} pulse={data.get('curr')}")
                     elif data.get("status") == "JOGGING":
@@ -641,6 +647,16 @@ class RecellMaster:
         direction='fwd'|'rev'. Isolates motor/driver from limit sensors."""
         self.send_command("JOG_STEPPER",
                           {"which": which, "dir": direction, "steps": int(steps)})
+
+    def jog_to_limit(self, which, direction):
+        """Armed jog toward the limit (parallel-limit aware: release-then-hit).
+        Stops at the limit, on STOP_STEPPER, or STEP_TIMEOUT. which='drain'|'sort',
+        direction='fwd'|'rev'."""
+        self.send_command("JOG_TO_LIMIT", {"which": which, "dir": direction})
+
+    def stop_stepper(self):
+        """Abort an in-progress jog_to_limit / home move."""
+        self.send_command("STOP_STEPPER")
 
     def home_stepper(self, which):
         """Push a stepper to its limit then retract to home. which='drain'|'sort'."""

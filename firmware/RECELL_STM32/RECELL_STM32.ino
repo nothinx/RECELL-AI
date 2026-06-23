@@ -95,6 +95,7 @@ bool inaReady = false, mlxReady = false, dacReady = false;
 // ==========================================================================
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(50);   // batasi blocking readStringUntil saat poll STOP mid-gerak
 
   Wire.setSDA(PIN_I2C_SDA);
   Wire.setSCL(PIN_I2C_SCL);
@@ -307,6 +308,24 @@ void processCommand(String jsonStr) {
     jogStepperRaw(pul, d, dirVal, steps);
     sendTelemetry(0, 0, "JOG_DONE");
   }
+  else if (cmd == "JOG_TO_LIMIT") {
+    // Jog ber-arm sampai limit (limit paralel: lepas dulu -> armed -> kena lagi).
+    // Berhenti otomatis di limit; bisa di-stop via STOP_STEPPER. which=drain|sort.
+    String which = doc["which"];
+    String dir   = doc["dir"];
+    bool sort = (which == "sort");
+    int  dirVal = (dir == "rev") ? DIR_HOME : DIR_FORWARD;
+    int  pul = sort ? PIN_STP_SORT_PUL : PIN_STP_DRAIN_PUL;
+    int  d   = sort ? PIN_STP_SORT_DIR : PIN_STP_DRAIN_DIR;
+    int  lim = sort ? PIN_LIMIT_SORTING : PIN_LIMIT_DRAIN;
+    if (moveStepperUntilLimit(pul, d, lim, dirVal))
+      sendTelemetry(0, 0, "LIMIT_HIT");
+    // false: STEP_TIMEOUT / JOG_STOPPED sudah dipancarkan di dalam (atau E-stop)
+  }
+  else if (cmd == "STOP_STEPPER") {
+    // Saat idle: ack supaya UI balikkan toggle. Mid-gerak ditangani poll di loop gerak.
+    sendTelemetry(0, 0, "JOG_STOPPED");
+  }
   else if (cmd == "HOME_STEPPER") {
     // Dorong ke limit lalu mundur ke home (tanpa DAC). which=drain|sort.
     String which = doc["which"];
@@ -475,6 +494,18 @@ bool moveStepperUntilLimit(int pinStep, int pinDir, int pinLimit, int dir) {
 
   for (long i = 0; ; i++) {
     if (emergencyActive()) return false;
+
+    // Stop manual mid-gerak: poll serial tiap 64 step. Cocokkan "STOP"
+    // (STOP_STEPPER/STOP_CONVEYOR/STOP_DIAG) -> hentikan gerak ber-arm dgn aman.
+    if ((i & 0x3F) == 0 && Serial.available() > 0) {
+      String s = Serial.readStringUntil('\n');
+      if (s.indexOf("STOP") >= 0) {
+        stopConveyor();
+        currentState = STATE_IDLE;
+        sendTelemetry(0, 0, "JOG_STOPPED");
+        return false;
+      }
+    }
 
     if (millis() - t0 > STEPPER_TIMEOUT_MS) {
       // Limit tak kunjung kena (motor macet / limit gagal) -> fault lunak.

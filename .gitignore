@@ -38,3 +38,6 @@ datasets/
 # Roboflow API key lokal — RAHASIA, jangan commit
 .roboflow_key
 jetson/.roboflow_key
+
+# venv terisolasi untuk roboflow upload (jangan commit)
+.venv_rf/

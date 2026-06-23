@@ -21,14 +21,14 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QProcess
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
     QGridLayout, QSpinBox,
 )
 
-from capture_dataset import open_camera, lock_focus  # reuse setelan kamera
+from capture_dataset import open_camera, lock_focus, IS_WINDOWS  # reuse setelan kamera
 
 CLASSES = ["KOSONG", "SEHAT", "KARAT", "SOBEK"]
 COLORS = {"KOSONG": "#64748B", "SEHAT": "#10B981", "KARAT": "#F59E0B", "SOBEK": "#EF4444"}
@@ -40,6 +40,11 @@ class CaptureGUI(QWidget):
         self.out_root = Path(out_root)
         self.index = index
         self.active = "SEHAT"
+        # venv terisolasi untuk upload roboflow (lindungi cv2 GUI dari dep bentrok)
+        self.repo_root = Path(__file__).resolve().parents[2]
+        self.rf_python = self.repo_root / (".venv_rf/Scripts/python.exe" if IS_WINDOWS else ".venv_rf/bin/python")
+        self.upload_script = Path(__file__).resolve().parent / "upload_roboflow.py"
+        self.proc = None
         for c in CLASSES:
             (self.out_root / c).mkdir(parents=True, exist_ok=True)
 
@@ -102,6 +107,25 @@ class CaptureGUI(QWidget):
             self.counts[c] = lab
             side.addWidget(lab)
 
+        # Pemilih kamera (USB rig vs webcam bawaan laptop)
+        cam_row = QHBoxLayout()
+        cam_row.addWidget(self._lbl("Kamera:", 12, "#94A3B8"))
+        for i in range(3):
+            cb = QPushButton(str(i))
+            cb.setFixedWidth(40)
+            cb.setStyleSheet("background:#1E293B; color:#E2E8F0; border:1px solid #334155; border-radius:6px;")
+            cb.clicked.connect(lambda _, idx=i: self._switch_cam(idx))
+            cam_row.addWidget(cb)
+        cam_row.addStretch(1)
+        side.addLayout(cam_row)
+
+        self.btn_upload = QPushButton("⬆  Upload ke Roboflow")
+        self.btn_upload.setMinimumHeight(48)
+        self.btn_upload.setStyleSheet(
+            "background:#7C3AED; color:white; font-size:15px; font-weight:800; border-radius:10px;")
+        self.btn_upload.clicked.connect(self._upload)
+        side.addWidget(self.btn_upload)
+
         self.status = self._lbl("", 12, "#94A3B8")
         side.addWidget(self.status)
         side.addStretch(1)
@@ -161,6 +185,45 @@ class CaptureGUI(QWidget):
         self._refresh_counts()
         self.status.setText(f"  ✓ {saved} gambar {cls} tersimpan.")
         self.take.setEnabled(True)
+
+    def _switch_cam(self, idx):
+        self.timer.stop()
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        try:
+            self.index = idx
+            self.cap = open_camera(idx)
+            self.cap.read(); time.sleep(0.2); lock_focus(self.cap, idx)
+            self.status.setText(f"  kamera #{idx} aktif")
+        except SystemExit:
+            self.status.setText(f"  kamera #{idx} tak terbuka")
+        self.timer.start(33)
+
+    def _upload(self):
+        if not self.rf_python.exists():
+            self.status.setText("  .venv_rf belum siap — minta Claude setup"); return
+        self.btn_upload.setEnabled(False)
+        self.status.setText("  upload ke Roboflow…")
+        self.proc = QProcess(self)
+        self.proc.setWorkingDirectory(str(self.repo_root))
+        self.proc.readyReadStandardOutput.connect(self._upload_out)
+        self.proc.readyReadStandardError.connect(self._upload_out)
+        self.proc.finished.connect(self._upload_done)
+        self.proc.start(str(self.rf_python), [str(self.upload_script), "--folder", str(self.out_root)])
+
+    def _upload_out(self):
+        out = bytes(self.proc.readAllStandardOutput()).decode("utf-8", "ignore")
+        err = bytes(self.proc.readAllStandardError()).decode("utf-8", "ignore")
+        text = (out + err).strip()
+        if text:
+            self.status.setText("  " + text.splitlines()[-1][:70])
+
+    def _upload_done(self, code, _status):
+        self.btn_upload.setEnabled(True)
+        self.status.setText("  ✓ upload selesai" if code == 0
+                            else f"  upload gagal (code {code}) — cek koneksi/key")
 
     def closeEvent(self, e):
         self.timer.stop()

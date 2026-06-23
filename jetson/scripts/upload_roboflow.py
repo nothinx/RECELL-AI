@@ -45,21 +45,35 @@ def main():
     except ImportError:
         sys.exit("[!] Paket belum ada: pip install roboflow")
 
-    imgs = sorted(Path(args.folder).glob("*.jpg"))
-    if not imgs:
-        sys.exit(f"[!] Tak ada .jpg di {args.folder}")
+    root = Path(args.folder)
+    # Per-kelas: subfolder = nama kelas (classification). Untuk project classification
+    # Roboflow, annotation_path diisi NAMA KELAS (bukan file) — terlabel otomatis.
+    jobs = []
+    classdirs = [d for d in sorted(root.iterdir()) if d.is_dir()] if root.exists() else []
+    if classdirs:
+        for d in classdirs:
+            for p in sorted(d.glob("*.jpg")):
+                jobs.append((p, d.name))
+    else:                                            # flat -> tanpa label
+        for p in sorted(root.glob("*.jpg")):
+            jobs.append((p, None))
+    if not jobs:
+        sys.exit(f"[!] Tak ada .jpg di {root}")
 
     project = Roboflow(api_key=args.api_key).workspace(args.workspace).project(args.project)
-    print(f"[upload] {len(imgs)} gambar -> {args.workspace}/{args.project} (split={args.split})")
+    print(f"[upload] {len(jobs)} gambar -> {args.workspace}/{args.project}")
     ok = 0
-    for i, p in enumerate(imgs, 1):
+    for i, (p, cls) in enumerate(jobs, 1):
         try:
-            project.upload(str(p), split=args.split)
+            if cls:                                  # classification: nama kelas sbg label
+                project.upload(str(p), annotation_path=cls, split=args.split)
+            else:
+                project.upload(str(p), split=args.split)
             ok += 1
-            print(f"  [{i}/{len(imgs)}] {p.name}")
+            print(f"  [{i}/{len(jobs)}] {cls or '-'}/{p.name}")
         except Exception as e:                       # 1 gambar gagal jangan gagalkan semua
-            print(f"  [{i}/{len(imgs)}] GAGAL {p.name}: {e}")
-    print(f"[upload] selesai: {ok}/{len(imgs)} sukses. Anotasi di app.roboflow.com.")
+            print(f"  [{i}/{len(jobs)}] GAGAL {p.name}: {e}")
+    print(f"[upload] selesai: {ok}/{len(jobs)} sukses.")
 
 
 if __name__ == "__main__":

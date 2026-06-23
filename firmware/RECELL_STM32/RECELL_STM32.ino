@@ -52,13 +52,25 @@ const int PIN_I2C_SCL       = PB6;
 // kalibrasi F12 / tombol di layar) tanpa re-flash. Default konveyor diturunkan
 // 100 -> 25 karena pada trial PWM 30 pun baterai over-shoot sensor IR.
 int  conveyorSpeed               = 25;    // PWM 0-255
-int  stepPulseUs                 = 50;    // setengah-pulsa stepper (us); makin besar makin pelan
+int  stepPulseUs                 = 50;    // setengah-pulsa stepper (us) target; makin besar makin pelan
+// Ramp akselerasi stepper: mulai dari rampStartPulseUs (pelan, anti-stall) lalu
+// turun bertahap ke stepPulseUs selama rampSteps step. Tanpa ramp, start langsung
+// di stepPulseUs kecil bikin motor cuma berdengung/diam (penyebab STEP_TIMEOUT).
+int  rampStartPulseUs            = 600;   // setengah-pulsa awal (pelan)
+int  rampSteps                   = 300;   // panjang ramp (step) sampai mencapai target
 const int  STEPPER_REARM_STEPS   = 40;    // limit harus LEPAS stabil sekian step
 const int  LIMIT_CONFIRM_SAMPLES = 4;     // sampel LOW beruntun utk konfirmasi
 const int  LIMIT_CONFIRM_US      = 200;   // jeda antar sampel konfirmasi
-const int  DISCHARGE_SAMPLES     = 40;    // 40 x 50ms = ~2000ms beban
-const int  DISCHARGE_PERIOD_MS   = 50;
-const uint16_t DAC_LOAD_VALUE    = 4095;  // beban maksimal
+int  dischargeSamples            = 40;    // 40 x 50ms = ~2000ms beban (tunable)
+int  dischargePeriodMs           = 50;    // (tunable)
+uint16_t dacLoadValue            = 4095;  // beban maksimal (tunable)
+int  ir2SettleMs                 = 0;     // delay lanjut konveyor setelah IR2 sblm stop (tunable)
+
+// Mode diagnostik: saat aktif, broadcast snapshot semua sensor tiap DIAG_PERIOD_MS.
+bool diagMode                    = false;
+unsigned long lastDiagMs         = 0;
+const unsigned long DIAG_PERIOD_MS = 200;
+bool dacManualOn                 = false; // status beban DAC (utk telemetri diag)
 const unsigned long END_OF_LINE_MS = 5000;
 const unsigned long STEPPER_TIMEOUT_MS = 10000; // stall guard: limit tak kunjung kena
 const unsigned long PROX_TIMEOUT_MS    = 25000; // guard: IR tak terdeteksi (baterai nyangkut)
@@ -148,6 +160,14 @@ void loop() {
   }
   if (currentState == STATE_WAIT_PROX_2) {
     if (digitalRead(PIN_IR_SORTING) == LOW) {
+      // Lanjut sebentar (ir2SettleMs) supaya baterai pas di ejector, baru stop.
+      if (ir2SettleMs > 0) {
+        unsigned long s0 = millis();
+        while (millis() - s0 < (unsigned long)ir2SettleMs) {
+          if (emergencyActive()) return;
+          delay(2);
+        }
+      }
       stopConveyor();
       currentState = STATE_IDLE;
       sendTelemetry(0, 0, "AT_PROX_2");
@@ -156,6 +176,12 @@ void loop() {
       currentState = STATE_IDLE;
       sendTelemetry(0, 0, "STEP_TIMEOUT");
     }
+  }
+
+  // Broadcast snapshot diagnostik saat mode diag aktif (panel kalibrasi terbuka).
+  if (diagMode && millis() - lastDiagMs >= DIAG_PERIOD_MS) {
+    lastDiagMs = millis();
+    sendDiag();
   }
 }
 
@@ -187,11 +213,23 @@ void processCommand(String jsonStr) {
     sendTelemetry(0, 0, "RESET_OK");
   }
   else if (cmd == "SET_CONFIG") {
-    // Panel kalibrasi mengirim kecepatan konveyor & pulsa stepper.
+    // Panel kalibrasi mengirim semua parameter motion + ukur (semua opsional).
     if (doc.containsKey("conveyor_speed"))
       conveyorSpeed = constrain((int)doc["conveyor_speed"], 0, 255);
     if (doc.containsKey("step_pulse_us"))
       stepPulseUs = constrain((int)doc["step_pulse_us"], 20, 5000);
+    if (doc.containsKey("ramp_start_us"))
+      rampStartPulseUs = constrain((int)doc["ramp_start_us"], 20, 5000);
+    if (doc.containsKey("ramp_steps"))
+      rampSteps = constrain((int)doc["ramp_steps"], 0, 5000);
+    if (doc.containsKey("dac_load"))
+      dacLoadValue = (uint16_t)constrain((int)doc["dac_load"], 0, 4095);
+    if (doc.containsKey("discharge_samples"))
+      dischargeSamples = constrain((int)doc["discharge_samples"], 1, 500);
+    if (doc.containsKey("discharge_period"))
+      dischargePeriodMs = constrain((int)doc["discharge_period"], 5, 1000);
+    if (doc.containsKey("ir2_settle"))
+      ir2SettleMs = constrain((int)doc["ir2_settle"], 0, 5000);
     sendTelemetry(conveyorSpeed, stepPulseUs, "CONFIG_OK");
   }
   else if (cmd == "JOG_FWD") {
@@ -235,6 +273,70 @@ void processCommand(String jsonStr) {
     currentState = STATE_IDLE;
     sendTelemetry(0, 0, "STOPPED");
   }
+  // ---- DIAGNOSTIK / PANEL KALIBRASI ----------------------------------------
+  else if (cmd == "START_DIAG") {
+    diagMode = true;
+    lastDiagMs = 0;                 // paksa snapshot pertama segera
+    sendTelemetry(0, 0, "DIAG_ON");
+  }
+  else if (cmd == "STOP_DIAG") {
+    diagMode = false;
+    sendTelemetry(0, 0, "DIAG_OFF");
+  }
+  else if (cmd == "JOG_STEPPER") {
+    // Jog mentah N step, tanpa limit. which=drain|sort, dir=fwd|rev.
+    String which = doc["which"];
+    String dir   = doc["dir"];
+    bool sort = (which == "sort");
+    int  dirVal = (dir == "rev") ? DIR_HOME : DIR_FORWARD;
+    long steps = doc.containsKey("steps") ? (long)doc["steps"] : 200;
+    int pul = sort ? PIN_STP_SORT_PUL : PIN_STP_DRAIN_PUL;
+    int d   = sort ? PIN_STP_SORT_DIR : PIN_STP_DRAIN_DIR;
+    jogStepperRaw(pul, d, dirVal, steps);
+    sendTelemetry(0, 0, "JOG_DONE");
+  }
+  else if (cmd == "HOME_STEPPER") {
+    // Dorong ke limit lalu mundur ke home (tanpa DAC). which=drain|sort.
+    String which = doc["which"];
+    bool sort = (which == "sort");
+    int pul = sort ? PIN_STP_SORT_PUL : PIN_STP_DRAIN_PUL;
+    int d   = sort ? PIN_STP_SORT_DIR : PIN_STP_DRAIN_DIR;
+    int lim = sort ? PIN_LIMIT_SORTING : PIN_LIMIT_DRAIN;
+    if (!moveStepperUntilLimit(pul, d, lim, DIR_FORWARD)) return;
+    if (!moveStepperUntilLimit(pul, d, lim, DIR_HOME)) return;
+    sendTelemetry(0, 0, "HOME_DONE");
+  }
+  else if (cmd == "CONVEYOR") {
+    // Konveyor manual: dir=fwd|rev|stop. fwd pakai pengaman auto-stop jog.
+    String dir = doc["dir"];
+    if (dir == "fwd") {
+      startConveyorForward();
+      jogStopMs = millis() + JOG_TIMEOUT_MS;
+      sendTelemetry(conveyorSpeed, 0, "JOGGING");
+    } else if (dir == "rev") {
+      startConveyorReverse();
+      jogStopMs = millis() + JOG_TIMEOUT_MS;
+      sendTelemetry(conveyorSpeed, 0, "JOGGING");
+    } else {
+      stopConveyor();
+      sendTelemetry(0, 0, "STOPPED");
+    }
+  }
+  else if (cmd == "DAC_LOAD") {
+    // Beban DAC manual: on=1/0, value 0-4095 (default dacLoadValue).
+    bool on = doc.containsKey("on") ? ((int)doc["on"] != 0) : false;
+    if (on) {
+      uint16_t val = doc.containsKey("value")
+                     ? (uint16_t)constrain((int)doc["value"], 0, 4095) : dacLoadValue;
+      digitalWrite(PIN_DAC_GATE, HIGH);
+      if (dacReady) dac.setVoltage(val, false);
+      dacManualOn = true;
+    } else {
+      safeShutdownLoad();
+      dacManualOn = false;
+    }
+    sendTelemetry(0, 0, "DAC_SET");
+  }
 }
 
 // --- Pengukuran SoH: push -> beban+stream discharge -> retract -------------
@@ -248,10 +350,10 @@ void runMeasurement() {
 
   // 3. Nyalakan beban DAC, sampling + stream discharge curve ~2s.
   digitalWrite(PIN_DAC_GATE, HIGH);
-  if (dacReady) dac.setVoltage(DAC_LOAD_VALUE, false);
+  if (dacReady) dac.setVoltage(dacLoadValue, false);
 
   float sumV = 0, sumI = 0;
-  for (int j = 0; j < DISCHARGE_SAMPLES; j++) {
+  for (int j = 0; j < dischargeSamples; j++) {
     if (emergencyActive()) { safeShutdownLoad(); return; }
     float vt, it, tt;
     if (inaReady) {
@@ -262,11 +364,11 @@ void runMeasurement() {
       vt = 3.75; it = 1.50; tt = tempPre; // dummy bila I2C belum terpasang
     }
     sumV += vt; sumI += it;
-    sendDischargeSample((unsigned long)j * DISCHARGE_PERIOD_MS, vt, it, tt);
-    delay(DISCHARGE_PERIOD_MS);
+    sendDischargeSample((unsigned long)j * dischargePeriodMs, vt, it, tt);
+    delay(dischargePeriodMs);
   }
-  float v = sumV / DISCHARGE_SAMPLES;
-  float i = sumI / DISCHARGE_SAMPLES;
+  float v = sumV / dischargeSamples;
+  float i = sumI / dischargeSamples;
   float tempPost  = mlxReady ? mlx.readObjectTempC() : tempPre;
   float tempDelta = tempPost - tempPre;
 
@@ -295,6 +397,19 @@ void startConveyorForward() {
   analogWrite(PIN_CONVEYOR_RPWM, conveyorSpeed);
 }
 
+// Konveyor mundur (LPWM) untuk reposisi manual saat setup. Soft-start sama.
+void startConveyorReverse() {
+  jogStopMs = 0;
+  digitalWrite(PIN_CONVEYOR_EN, HIGH);
+  analogWrite(PIN_CONVEYOR_RPWM, 0);
+  for (int pwm = 0; pwm < conveyorSpeed; pwm += 5) {
+    if (emergencyActive()) return;
+    analogWrite(PIN_CONVEYOR_LPWM, pwm);
+    delay(15);
+  }
+  analogWrite(PIN_CONVEYOR_LPWM, conveyorSpeed);
+}
+
 void stopConveyor() {
   jogStopMs = 0;
   analogWrite(PIN_CONVEYOR_RPWM, 0);
@@ -314,6 +429,22 @@ bool limitConfirmed(int pinLimit) {
     if (digitalRead(pinLimit) != LOW) return false;
   }
   return true;
+}
+
+// Lebar setengah-pulsa pada step ke-i dengan ramp akselerasi: mulai pelan
+// (rampStartPulseUs) lalu turun linear ke stepPulseUs selama rampSteps step.
+int rampPulseUs(long i) {
+  if (rampSteps <= 0 || i >= rampSteps) return stepPulseUs;
+  long span = (long)rampStartPulseUs - stepPulseUs;     // biasanya > 0 (start lebih lambat)
+  return (int)(rampStartPulseUs - span * i / rampSteps);
+}
+
+// Satu langkah stepper dengan lebar pulsa terampa (dipakai bersama oleh
+// moveStepperUntilLimit & jog mentah).
+inline void stepPulse(int pinStep, long i) {
+  int half = rampPulseUs(i);
+  digitalWrite(pinStep, HIGH); delayMicroseconds(half);
+  digitalWrite(pinStep, LOW);  delayMicroseconds(half);
 }
 
 // Gerakkan stepper ke arah 'dir' SAMPAI limit kena. Robust untuk start menempel
@@ -348,8 +479,18 @@ bool moveStepperUntilLimit(int pinStep, int pinDir, int pinLimit, int dir) {
       if (armed && limitConfirmed(pinLimit)) return true;
     }
 
-    digitalWrite(pinStep, HIGH); delayMicroseconds(stepPulseUs);
-    digitalWrite(pinStep, LOW);  delayMicroseconds(stepPulseUs);
+    stepPulse(pinStep, i);
+  }
+}
+
+// Jog MENTAH: gerak 'steps' step ke arah 'dir' TANPA peduli limit. Untuk diagnosa
+// motor/driver terisolasi dari sensor limit. Abort-aware (E-stop). Pakai ramp.
+void jogStepperRaw(int pinStep, int pinDir, int dir, long steps) {
+  digitalWrite(pinDir, dir);
+  delayMicroseconds(20);
+  for (long i = 0; i < steps; i++) {
+    if (emergencyActive()) return;
+    stepPulse(pinStep, i);
   }
 }
 
@@ -386,6 +527,49 @@ void sendDischargeSample(unsigned long t_ms, float v, float i, float temp) {
   doc["volt"]   = serialized(String(v, 4));
   doc["curr"]   = serialized(String(i, 4));
   doc["temp"]   = serialized(String(temp, 2));
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+const char* stateName() {
+  switch (currentState) {
+    case STATE_WAIT_PROX_1: return "WAIT_PROX_1";
+    case STATE_WAIT_PROX_2: return "WAIT_PROX_2";
+    case STATE_EMERGENCY:   return "EMERGENCY";
+    default:                return "IDLE";
+  }
+}
+
+// Snapshot diagnostik: semua input digital, sensor I2C, state, config aktif.
+// Sensor aktif LOW -> dilaporkan 1 saat aktif (objek/tertekan) supaya intuitif di UI.
+void sendDiag() {
+  StaticJsonDocument<768> doc;
+  doc["status"] = "DIAG";
+  doc["ir_d"]   = (digitalRead(PIN_IR_DRAIN)      == LOW) ? 1 : 0;
+  doc["ir_s"]   = (digitalRead(PIN_IR_SORTING)    == LOW) ? 1 : 0;
+  doc["ir_b"]   = (digitalRead(PIN_IR_BACKUP)     == LOW) ? 1 : 0;
+  doc["lim_d"]  = (digitalRead(PIN_LIMIT_DRAIN)   == LOW) ? 1 : 0;
+  doc["lim_s"]  = (digitalRead(PIN_LIMIT_SORTING) == LOW) ? 1 : 0;
+  doc["emg"]    = (digitalRead(PIN_EMERGENCY)     == LOW) ? 1 : 0;
+  doc["v"]      = serialized(String(inaReady ? ina226.getBusVoltage_V() : 0.0, 3));
+  doc["i"]      = serialized(String(inaReady ? ina226.getCurrent_mA() / 1000.0 : 0.0, 3));
+  doc["t_obj"]  = serialized(String(mlxReady ? mlx.readObjectTempC()  : 0.0, 1));
+  doc["t_amb"]  = serialized(String(mlxReady ? mlx.readAmbientTempC() : 0.0, 1));
+  JsonObject rdy = doc.createNestedObject("rdy");
+  rdy["ina"] = inaReady ? 1 : 0;
+  rdy["mlx"] = mlxReady ? 1 : 0;
+  rdy["dac"] = dacReady ? 1 : 0;
+  doc["st"]  = stateName();
+  doc["dac"] = dacManualOn ? 1 : 0;
+  JsonObject cfg = doc.createNestedObject("cfg");
+  cfg["spd"]   = conveyorSpeed;
+  cfg["pul"]   = stepPulseUs;
+  cfg["ramp"]  = rampStartPulseUs;
+  cfg["rstep"] = rampSteps;
+  cfg["load"]  = dacLoadValue;
+  cfg["dsmp"]  = dischargeSamples;
+  cfg["dper"]  = dischargePeriodMs;
+  cfg["ir2"]   = ir2SettleMs;
   serializeJson(doc, Serial);
   Serial.println();
 }

@@ -6,6 +6,7 @@ import json
 import argparse
 import sys
 import os
+import subprocess
 from pathlib import Path
 try:
     import xgboost as xgb
@@ -38,6 +39,28 @@ BAUD_RATE = 115200
 # kurang, turunkan bila masih berat.
 YOLO_IMGSZ = 320
 YOLO_CONF = 0.25
+
+# Batas laju kirim frame ke UI. Inferensi TensorRT bisa ~70 fps; tanpa rem ini,
+# camera loop membanjiri thread GUI (tiap frame discale SmoothTransformation) →
+# antrian signal Qt menumpuk tak terbatas → seluruh UI beku/tombol tak bisa
+# dipencet. 20 fps lebih dari cukup untuk preview; inferensi & latest_frame tetap
+# jalan penuh. ponytail: cara "benar" = UI tarik latest_frame via QTimer; throttle
+# di produsen ini lebih kecil dan sudah cukup.
+UI_FRAME_INTERVAL = 1.0 / 20  # detik
+
+# Kamera (Logitech C930e: sensor 16:9). Minta 4:3 (640x480) bikin driver crop
+# sisi kiri-kanan → FOV menyempit & tampak "zoom". Pakai 16:9 untuk FOV penuh.
+# 848x480 dipilih (bukan 720p): FOV sama penuhnya tapi beban ~setara 640x480 —
+# 720p bikin scaling pixmap per-frame di thread GUI kelebihan beban → tombol UI
+# tak responsif (YOLO toh downscale ke imgsz=320, jadi 720p sia-sia).
+# ponytail: kalau butuh display lebih tajam, naikkan res + decouple laju display
+# dari inferensi (emit tiap N frame), jangan sekadar gedein resolusi.
+# Autofocus kontinu terus "hunting" di atas konveyor → matikan & kunci fokus.
+# CAM_FOCUS tergantung jarak kamera→konveyor, tune live:
+#   v4l2-ctl -d /dev/video0 -c focus_automatic_continuous=0 -c focus_absolute=NNN
+CAM_WIDTH = int(os.environ.get("CAM_WIDTH", 848))
+CAM_HEIGHT = int(os.environ.get("CAM_HEIGHT", 480))
+CAM_FOCUS = int(os.environ.get("CAM_FOCUS", 115))  # 0-255 step 5; -1 = biarkan autofocus
 YOLO_ENGINE_PATH = MODELS_DIR / "weights" / "best.engine"   # preferred on Jetson
 YOLO_PT_PATH = MODELS_DIR / "weights" / "best.pt"           # fallback (dev / non-Jetson)
 XGB_MODEL_PATH = MODELS_DIR / "weights" / "soh_xgb_model.json"
@@ -47,7 +70,24 @@ CALIB_PATH = BASE_DIR / "calibration.json"
 # over-shooting the IR sensor even at PWM 30. Tune live via the F12 / on-screen
 # calibration panel; values persist to calibration.json and are pushed to the
 # STM32 on every connect.
-DEFAULT_CALIBRATION = {"conveyor_speed": 25, "step_pulse_us": 50}
+# Keys match the STM32 SET_CONFIG parser exactly (sent verbatim as the payload).
+DEFAULT_CALIBRATION = {
+    "conveyor_speed": 25,    # PWM 0-255
+    "step_pulse_us": 50,     # stepper half-pulse target (us)
+    "ramp_start_us": 600,    # stepper accel ramp: slow start half-pulse (us)
+    "ramp_steps": 300,       # ramp length (steps) to reach target
+    "dac_load": 4095,        # measurement DAC load 0-4095
+    "discharge_samples": 40, # discharge curve samples
+    "discharge_period": 50,  # ms per discharge sample
+    "ir2_settle": 0,         # ms conveyor runs past IR2 before stopping
+}
+# Per-field clamp ranges (must mirror firmware constrain()).
+CALIB_RANGES = {
+    "conveyor_speed": (0, 255), "step_pulse_us": (20, 5000),
+    "ramp_start_us": (20, 5000), "ramp_steps": (0, 5000),
+    "dac_load": (0, 4095), "discharge_samples": (1, 500),
+    "discharge_period": (5, 1000), "ir2_settle": (0, 5000),
+}
 
 # Map YOLO class label -> (delta to vision_score, is_critical)
 # Classes from best.pt: KARAT (rust), SEHAT (healthy), SOBEK (torn wrapper)
@@ -60,6 +100,10 @@ CLASS_RULES = {
 # A defect class must be detected in at least this many *frames* during a
 # cycle before it counts toward the grade. Filters transient false positives.
 DEFECT_PERSIST_FRAMES = 3
+
+# Berapa frame beruntun harus ada deteksi (kelas apa pun) sebelum dianggap ada
+# baterai di bawah kamera. Dipakai vision-gated cycle untuk memicu stop inspeksi.
+BATTERY_PRESENT_FRAMES = 3
 
 
 class RecellMaster:
@@ -83,6 +127,10 @@ class RecellMaster:
         self.vision_score = 1.0
         self.electrical_data = {"soh": 0, "volt": 0, "curr": 0}
         self.latest_frame = None
+        self._last_ui_emit = 0.0  # throttle frame push to UI (lihat UI_FRAME_INTERVAL)
+        # Deteksi kehadiran baterai di bawah kamera (hulu) untuk vision-gated cycle.
+        self.battery_in_view = False
+        self._battery_frames = 0
         self.current_battery_id = None
         # Count how many frames in the current cycle saw each label, so a
         # single false-positive frame doesn't permanently mark a defect.
@@ -163,6 +211,10 @@ class RecellMaster:
                 self.log_msg(f"[Comm] Connected to STM32 on {port}")
                 self.status["serial"] = "online"
                 time.sleep(2)  # let the board finish booting before config
+                # Safety: pastikan konveyor berhenti saat (re)connect — kalau STM32
+                # sebelumnya ditinggal jalan (mis. crash/restart Jetson), ini
+                # membawanya ke keadaan diam yang pasti.
+                self.send_command("STOP_CONVEYOR")
                 self.send_command("SET_CONFIG", self.calibration)
                 self.log_msg(f"[Comm] Pushed calibration: {self.calibration}")
             except Exception as e:
@@ -262,6 +314,27 @@ class RecellMaster:
             if not self._camera_restart_requested:
                 break
 
+    def _lock_focus(self):
+        """Matikan autofocus kontinu & kunci fokus di CAM_FOCUS. Dipanggil setelah
+        stream jalan (C930e abaikan set fokus saat open). LC_ALL=C: di bawah systemd
+        locale kosong bikin v4l2-ctl gagal parse arg. Dua panggilan terpisah lebih
+        andal dari satu gabungan. CAM_FOCUS<0 = biarkan autofocus."""
+        if CAM_FOCUS < 0:
+            return
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+        try:
+            for ctrl in (f"focus_automatic_continuous=0", f"focus_absolute={CAM_FOCUS}"):
+                r = subprocess.run(
+                    ["v4l2-ctl", "-d", "/dev/video0", "-c", ctrl],
+                    check=False, timeout=2, env=env,
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    self.log_msg(f"[Camera] set fokus '{ctrl}' gagal: {r.stderr.strip()}")
+            self.log_msg(f"[Camera] Fokus dikunci (focus_absolute={CAM_FOCUS}, autofocus off).")
+        except (FileNotFoundError, subprocess.SubprocessError):
+            self.log_msg("[Camera] v4l2-ctl tak ada; fokus tetap auto (pasang v4l-utils).")
+
     def _run_camera_session(self):
         """Satu sesi kamera: buka, inferensi, tutup. Bisa diulang oleh vision_thread."""
         if self.mock_ai:
@@ -282,24 +355,36 @@ class RecellMaster:
         # Realtime: buffer 1 frame agar tidak menampilkan frame lama (sumber utama
         # rasa "delay"); turunkan resolusi capture agar ringan.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
+        # MJPG dulu baru resolusi (urutan penting untuk 720p@30 di USB2).
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
         self.status["camera"] = "online"
         self._notify_status()
         self.log_msg(f"[Camera] Kamera aktif, inferensi YOLO (imgsz={YOLO_IMGSZ}, conf={YOLO_CONF}).")
 
+        focus_locked = False  # kunci fokus SETELAH stream jalan (lihat _lock_focus)
         try:
             while self.running and not self._camera_restart_requested:
                 ret, frame = cap.read()
                 if not ret:
                     time.sleep(0.05)
                     continue
+                if not focus_locked:
+                    # C930e tak menerima set fokus saat open (sebelum streaming);
+                    # baru nempel setelah ada frame. Jadi terapkan sekali di sini.
+                    self._lock_focus()
+                    focus_locked = True
                 try:
                     results = self.model(frame, imgsz=YOLO_IMGSZ, conf=YOLO_CONF, verbose=False)
                     annotated_frame = results[0].plot()
                     self.latest_frame = annotated_frame.copy()
-                    if 'on_frame' in self.ui_callbacks:
+                    # Throttle ke UI agar thread GUI tidak kebanjiran (lihat
+                    # UI_FRAME_INTERVAL). latest_frame tetap update tiap frame.
+                    now = time.time()
+                    if ('on_frame' in self.ui_callbacks
+                            and now - self._last_ui_emit >= UI_FRAME_INTERVAL):
+                        self._last_ui_emit = now
                         self.ui_callbacks['on_frame'](annotated_frame)
                     self.process_ai_results(results)
                 except Exception as e:
@@ -324,6 +409,14 @@ class RecellMaster:
                 labels_this_frame.add(self.model.names[cls_id])
         for label in labels_this_frame:
             self.defect_frame_counts[label] += 1
+
+        # Kehadiran baterai di bawah kamera: deteksi kelas apa pun (SEHAT/KARAT/
+        # SOBEK = ada baterai). Persistensi BATTERY_PRESENT_FRAMES buang noise.
+        if labels_this_frame:
+            self._battery_frames += 1
+        else:
+            self._battery_frames = 0
+        self.battery_in_view = self._battery_frames >= BATTERY_PRESENT_FRAMES
 
         # Live vision_score reflects only labels that have persisted across
         # enough frames. SEHAT is informational, KARAT/SOBEK shape the score.
@@ -372,6 +465,11 @@ class RecellMaster:
                 ready = (not self.simulate and self.ser and self.ser.in_waiting > 0)
                 line = self.ser.readline().decode('utf-8', errors='ignore').strip() if ready else None
             if line:
+                # DIAGNOSTIK sementara: lihat persis status STM32 yang masuk &
+                # kapan, untuk debug urutan langkah. DISCHARGE_SAMPLE di-skip
+                # (terlalu sering). Hapus blok ini setelah selesai debug.
+                if "DISCHARGE_SAMPLE" not in line and "DIAG" not in line:
+                    self.log_msg(f"[RX] {line}")
                 try:
                     data = json.loads(line)
                     if data.get("status") == "MEASUREMENT_DONE":
@@ -433,6 +531,10 @@ class RecellMaster:
                         # Board (re)booted — re-push calibration so it survives a reset.
                         self.send_command("SET_CONFIG", self.calibration)
                         self.log_msg(f"[STM32] Boot detected — re-pushed calibration: {self.calibration}")
+                    elif data.get("status") == "DIAG":
+                        # Live diagnostic snapshot — route to panel, do not log (5 Hz).
+                        if "on_diag" in self.ui_callbacks:
+                            self.ui_callbacks["on_diag"](data)
                 except Exception:
                     pass
             time.sleep(0.01)
@@ -448,9 +550,25 @@ class RecellMaster:
                 self._simulate_measurement()
             self.wait_flag = False
         else:
+            self.log_msg(f"[TX] {cmd}")  # DIAGNOSTIK sementara (hapus stlh debug)
             with self._serial_lock:
                 if self.ser:
-                    self.ser.write(payload.encode())
+                    try:
+                        self.ser.write(payload.encode())
+                    except (serial.SerialException, OSError) as e:
+                        # USB serial bisa lepas/kontak putus saat runtime (Errno 5
+                        # I/O). JANGAN biarkan ini meledak ke pemanggil — kalau
+                        # Emergency Stop yang memicunya, exception mengunci UI
+                        # (START tak pernah di-enable lagi). Tandai offline & diam.
+                        self.log_msg(f"[Comm] Serial write gagal ({e}) — port offline. Reconnect via ⚙ Serial.")
+                        self.status["serial"] = "offline"
+                        self.simulate = True
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
+                        self._notify_status()
 
     # ----- CALIBRATION ------------------------------------------------------
     def _load_calibration(self):
@@ -463,12 +581,15 @@ class RecellMaster:
             pass  # missing/invalid file -> defaults
         return cfg
 
-    def set_calibration(self, conveyor_speed, step_pulse_us, save=True):
-        """Update motion config, push it to the STM32, and optionally persist."""
-        self.calibration = {
-            "conveyor_speed": max(0, min(255, int(conveyor_speed))),
-            "step_pulse_us": max(20, min(5000, int(step_pulse_us))),
-        }
+    def update_calibration(self, updates, save=True):
+        """Merge *updates* into calibration (clamped per CALIB_RANGES), push the
+        FULL config to the STM32, and optionally persist. Accepts any subset of
+        the DEFAULT_CALIBRATION keys."""
+        for k, v in updates.items():
+            if k not in DEFAULT_CALIBRATION:
+                continue
+            lo, hi = CALIB_RANGES[k]
+            self.calibration[k] = max(lo, min(hi, int(v)))
         self.send_command("SET_CONFIG", self.calibration)
         if save:
             try:
@@ -479,12 +600,46 @@ class RecellMaster:
                 self.log_msg(f"[Calib] Could not save calibration: {e}")
         return self.calibration
 
+    # Backward-compat shim (older callers passing two positional args).
+    def set_calibration(self, conveyor_speed, step_pulse_us, save=True):
+        return self.update_calibration(
+            {"conveyor_speed": conveyor_speed, "step_pulse_us": step_pulse_us}, save)
+
     def jog_forward(self):
         """Run the conveyor forward continuously (setup speed test)."""
         self.send_command("JOG_FWD")
 
     def stop_conveyor(self):
         self.send_command("STOP_CONVEYOR")
+
+    # ----- DIAGNOSTIC PANEL CONTROLS ---------------------------------------
+    def start_diag(self):
+        """Ask the STM32 to start broadcasting sensor snapshots (~5 Hz)."""
+        self.send_command("START_DIAG")
+
+    def stop_diag(self):
+        self.send_command("STOP_DIAG")
+
+    def jog_stepper(self, which, direction, steps=200):
+        """Raw-jog a stepper N steps, ignoring limits. which='drain'|'sort',
+        direction='fwd'|'rev'. Isolates motor/driver from limit sensors."""
+        self.send_command("JOG_STEPPER",
+                          {"which": which, "dir": direction, "steps": int(steps)})
+
+    def home_stepper(self, which):
+        """Push a stepper to its limit then retract to home. which='drain'|'sort'."""
+        self.send_command("HOME_STEPPER", {"which": which})
+
+    def conveyor_manual(self, direction):
+        """Manual conveyor: direction='fwd'|'rev'|'stop'."""
+        self.send_command("CONVEYOR", {"dir": direction})
+
+    def dac_load(self, on, value=None):
+        """Manual DAC load on/off (+ optional 0-4095 value)."""
+        params = {"on": 1 if on else 0}
+        if value is not None:
+            params["value"] = int(value)
+        self.send_command("DAC_LOAD", params)
 
     def _simulate_measurement(self):
         """Produce a realistic measurement and a short discharge curve in --sim mode.
@@ -577,19 +732,37 @@ class RecellMaster:
         # firmware replies RESET_OK (not awaited). If the physical button is still
         # held, firmware re-enters EMERGENCY immediately.
         self.send_command("RESET")
+        self._flush_serial()  # buang status basi siklus sebelumnya
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         img_path = str(DATA_DIR / f"{battery_id}.jpg")
 
-        self.log_msg("[1] Evaluating Vision...")
-        time.sleep(1)
+        # [1] INSPEKSI VISUAL (vision-gated). Kamera ada di HULU, menghadap bawah.
+        # Jalankan konveyor, tunggu YOLO melihat baterai lewat di bawah kamera,
+        # lalu STOP untuk foto diam (anti-blur) + grade. Stop ini berbasis vision
+        # (toleran lag); stop presisi di stasiun ukur tetap sensor IR (langkah 2).
+        self.log_msg("[1] Mencari baterai di bawah kamera…")
+        self.defect_frame_counts = defaultdict(int)
+        # Hanya jalankan konveyor bila baterai belum di bawah kamera (hindari lurch).
+        if not self.battery_in_view:
+            self.send_command("JOG_FWD")  # maju bebas (firmware auto-stop 10s pengaman)
+        detected = self._wait_for_battery_in_view(timeout=8.0)
+        self.send_command("STOP_CONVEYOR")
+        if not detected:
+            self.log_msg("[ABORT] Tidak ada baterai terdeteksi di bawah kamera (8s).")
+            return
+        if self._aborted():
+            return
+        time.sleep(0.8)                              # settle: belt berhenti, frame tajam
+        self.defect_frame_counts = defaultdict(int)  # grade HANYA dari frame diam
+        time.sleep(1.2)                              # akumulasi ~1.2s frame diam
         if self.latest_frame is not None:
             cv2.imwrite(img_path, self.latest_frame)
         else:
-            # No camera frame available: skip writing a placeholder. The PDF
-            # generator falls back to "[No Photo Available]" when the path
-            # doesn't exist.
             img_path = ""
+        self.log_msg(
+            f"[1b] Vision: score={self.vision_score:.2f}, "
+            f"defects={','.join(self.get_confirmed_defects()) or 'none'}")
 
         self.log_msg("[2] Moving to Sensor Station (PROX 1)...")
         self.wait_flag = True
@@ -669,6 +842,33 @@ class RecellMaster:
         if self.abort_cycle:
             self.log_msg("[ABORT] Cycle aborted by Emergency Stop.")
             return True
+        return False
+
+    def _flush_serial(self):
+        """Buang status basi di buffer masuk sebelum siklus baru, agar tidak ada
+        balasan lama (mis. DROPPED_B/AT_PROX dari siklus lalu) yang keliru
+        meng-clear wait_flag langkah berikutnya."""
+        if self.simulate:
+            return
+        with self._serial_lock:
+            if self.ser:
+                try:
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
+
+    def _wait_for_battery_in_view(self, timeout=8.0):
+        """Blokir s/d kamera (hulu) melihat baterai (battery_in_view), abort, atau
+        timeout. True bila terdeteksi; False bila tak ada baterai / di-abort."""
+        if self.mock_ai:
+            return True  # tanpa kamera nyata: lewati gating
+        start = time.time()
+        while self.running and not self.abort_cycle:
+            if self.battery_in_view:
+                return True
+            if time.time() - start > timeout:
+                return False
+            time.sleep(0.05)
         return False
 
     def _wait_for_step(self, timeout=45.0):

@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QWidget, QFrame, QPlainTextEdit, QProgressBar, QSizePolicy, QGraphicsDropShadowEffect,
     QDialog, QComboBox, QSpinBox, QDialogButtonBox, QListWidget, QListWidgetItem,
-    QFormLayout,
+    QFormLayout, QTabWidget, QGridLayout,
 )
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QImage, QPixmap, QColor
@@ -460,17 +460,41 @@ class SerialConfigDialog(QDialog):
 
 
 # ----- CALIBRATION DIALOG ---------------------------------------------------
-class CalibrationDialog(QDialog):
-    """Setup panel to tune conveyor speed + stepper pulse without re-flashing.
+# Parameter tunable: (key, label, min, max, step). Urutan = tampilan di tab.
+CALIB_FIELDS = [
+    ("conveyor_speed",    "Conveyor speed (PWM 0–255)",      0,  255,   5),
+    ("step_pulse_us",     "Stepper pulse target (µs, ↑=pelan)", 20, 5000, 10),
+    ("ramp_start_us",     "Ramp start (µs, awal pelan)",      20, 5000,  50),
+    ("ramp_steps",        "Ramp panjang (step)",              0,  5000,  50),
+    ("dac_load",          "DAC beban (0–4095)",               0,  4095, 100),
+    ("discharge_samples", "Sampel discharge",                 1,  500,    5),
+    ("discharge_period",  "Periode discharge (ms)",           5,  1000,   5),
+    ("ir2_settle",        "IR2 settle (ms)",                  0,  5000,  50),
+]
 
-    Opened from the on-screen button or F12. Apply pushes live to the STM32;
-    Save also persists to calibration.json so it survives restarts.
+# Indikator sensor digital di tab Monitor: (key, label, active_is_bad)
+DIAG_DIGITAL = [
+    ("ir_d",  "IR Ukur",       False),
+    ("ir_s",  "IR Sorting",    False),
+    ("ir_b",  "IR Backup",     False),
+    ("lim_d", "Limit Ukur",    False),
+    ("lim_s", "Limit Sorting", False),
+    ("emg",   "Emergency",     True),   # aktif = bahaya → merah
+]
+
+
+class CalibrationDialog(QDialog):
+    """Panel diagnostik & kalibrasi ber-tab (Monitor / Parameter / Manual).
+
+    Dibuka dari tombol layar atau F12. Saat terbuka, firmware stream snapshot
+    sensor (~5 Hz) ke tab Monitor. Parameter: Apply live + Simpan ke
+    calibration.json. Manual: gerakkan tiap aktuator sendiri untuk diagnosa.
     """
     def __init__(self, master, parent=None):
         super().__init__(parent)
         self.master = master
         self.setWindowTitle("Kalibrasi — Setup Kecepatan")
-        self.setMinimumWidth(380)
+        self.setMinimumSize(520, 460)
         self.setStyleSheet(f"""
             QDialog {{ background:{COL_BG}; color:{COL_TEXT}; }}
             QLabel  {{ color:{COL_TEXT}; }}
@@ -480,72 +504,218 @@ class CalibrationDialog(QDialog):
                 font-size:14px; font-weight:700; min-width:90px;
             }}
             QPushButton {{
-                border:none; border-radius:8px; padding:8px 16px;
+                border:none; border-radius:8px; padding:9px 14px;
                 font-weight:700; font-size:12px;
             }}
+            QTabBar::tab {{
+                background:{COL_SURFACE_ALT}; color:{COL_HEADING};
+                padding:10px 22px; font-weight:700; font-size:13px;
+                border:1px solid {COL_BORDER}; border-bottom:none;
+                border-top-left-radius:8px; border-top-right-radius:8px;
+            }}
+            QTabBar::tab:selected {{ background:{COL_ACCENT}; color:white; }}
+            QTabWidget::pane {{ border:1px solid {COL_BORDER}; border-radius:8px; top:-1px; }}
         """)
 
-        cal = master.calibration
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 18)
-        lay.setSpacing(12)
+        self._mon = {}   # key -> (dot_label, value_label)
+        self._spins = {}
 
-        hint = QLabel("Turunkan nilai jika alat bergerak terlalu cepat.")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_monitor_tab(), "Monitor")
+        tabs.addTab(self._build_param_tab(), "Parameter")
+        tabs.addTab(self._build_manual_tab(), "Manual")
+        lay.addWidget(tabs)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        btn_close = QPushButton("Tutup")
+        btn_close.setStyleSheet(
+            f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};")
+        btn_close.clicked.connect(self.accept)
+        close_row.addWidget(btn_close)
+        lay.addLayout(close_row)
+
+    # ---- TAB: MONITOR ------------------------------------------------------
+    def _build_monitor_tab(self):
+        w = QWidget()
+        grid = QGridLayout(w)
+        grid.setContentsMargins(16, 16, 16, 16)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+
+        # Kolom kiri: input digital (dot warna). Kolom kanan: analog + status.
+        for r, (key, label, _bad) in enumerate(DIAG_DIGITAL):
+            dot = QLabel()
+            dot.setFixedSize(16, 16)
+            dot.setStyleSheet(self._dot_qss(COL_MUTED))
+            name = QLabel(label)
+            name.setStyleSheet(f"color:{COL_HEADING}; font-size:13px; font-weight:600;")
+            grid.addWidget(dot, r, 0)
+            grid.addWidget(name, r, 1)
+            self._mon[key] = (dot, None)
+
+        analog = [
+            ("v", "Tegangan"), ("i", "Arus"),
+            ("t_obj", "Suhu objek"), ("t_amb", "Suhu ambient"),
+            ("st", "State"), ("rdy", "Sensor I2C"),
+        ]
+        for r, (key, label) in enumerate(analog):
+            name = QLabel(label)
+            name.setStyleSheet(f"color:{COL_MUTED}; font-size:12px; font-weight:600;")
+            val = QLabel("—")
+            val.setStyleSheet(f"color:{COL_HEADING}; font-size:14px; font-weight:800;")
+            grid.addWidget(name, r, 3)
+            grid.addWidget(val, r, 4)
+            self._mon[key] = (None, val)
+
+        hint = QLabel("Gerakkan baterai / tekan sensor — indikator update live.")
         hint.setStyleSheet(f"color:{COL_MUTED}; font-size:11px; font-weight:600;")
-        lay.addWidget(hint)
+        grid.addWidget(hint, len(DIAG_DIGITAL), 0, 1, 5)
+        grid.setColumnStretch(2, 1)
+        grid.setRowStretch(len(DIAG_DIGITAL) + 1, 1)
+        return w
+
+    def _dot_qss(self, color):
+        return f"background:{color}; border-radius:8px;"
+
+    def update_monitor(self, d):
+        """Dipanggil dari main thread dgn snapshot DIAG firmware."""
+        for key, _label, bad in DIAG_DIGITAL:
+            dot, _ = self._mon.get(key, (None, None))
+            if dot is None:
+                continue
+            active = bool(d.get(key, 0))
+            if active:
+                color = COL_ERROR if bad else COL_ACCENT
+            else:
+                color = COL_MUTED
+            dot.setStyleSheet(self._dot_qss(color))
+        def setv(key, text):
+            pair = self._mon.get(key)
+            if pair and pair[1] is not None:
+                pair[1].setText(text)
+        setv("v", f"{float(d.get('v', 0)):.3f} V")
+        setv("i", f"{float(d.get('i', 0)):.3f} A")
+        setv("t_obj", f"{float(d.get('t_obj', 0)):.1f} °C")
+        setv("t_amb", f"{float(d.get('t_amb', 0)):.1f} °C")
+        setv("st", str(d.get("st", "—")))
+        rdy = d.get("rdy", {})
+        setv("rdy", f"INA {'✓' if rdy.get('ina') else '✗'}  "
+                    f"MLX {'✓' if rdy.get('mlx') else '✗'}  "
+                    f"DAC {'✓' if rdy.get('dac') else '✗'}")
+
+    # ---- TAB: PARAMETER ----------------------------------------------------
+    def _build_param_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
 
         form = QFormLayout()
-        form.setSpacing(10)
-        self.spin_speed = QSpinBox()
-        self.spin_speed.setRange(0, 255)
-        self.spin_speed.setValue(int(cal.get("conveyor_speed", 25)))
-        self.spin_pulse = QSpinBox()
-        self.spin_pulse.setRange(20, 5000)
-        self.spin_pulse.setSingleStep(10)
-        self.spin_pulse.setValue(int(cal.get("step_pulse_us", 50)))
-        form.addRow(self._lbl("Conveyor speed (PWM 0–255)"), self.spin_speed)
-        form.addRow(self._lbl("Stepper pulse (µs, ↑ = pelan)"), self.spin_pulse)
+        form.setSpacing(9)
+        cal = self.master.calibration
+        for key, label, lo, hi, step in CALIB_FIELDS:
+            spin = QSpinBox()
+            spin.setRange(lo, hi)
+            spin.setSingleStep(step)
+            spin.setValue(int(cal.get(key, lo)))
+            self._spins[key] = spin
+            form.addRow(self._lbl(label), spin)
         lay.addLayout(form)
+        lay.addStretch(1)
 
-        # Live jog test row
-        jog_row = QHBoxLayout()
-        btn_jog = QPushButton("▶ Jog Forward")
-        btn_jog.setStyleSheet(f"background:{COL_INFO}; color:white;")
-        btn_jog.clicked.connect(self._jog)
-        btn_jog_stop = QPushButton("■ Stop")
-        btn_jog_stop.setStyleSheet(f"background:{COL_ERROR}; color:white;")
-        btn_jog_stop.clicked.connect(master.stop_conveyor)
-        jog_row.addWidget(btn_jog)
-        jog_row.addWidget(btn_jog_stop)
-        lay.addLayout(jog_row)
-
-        # Action row
-        act_row = QHBoxLayout()
+        act = QHBoxLayout()
         btn_apply = QPushButton("Apply (live)")
         btn_apply.setStyleSheet(
             f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};")
         btn_apply.clicked.connect(lambda: self._apply(save=False))
-        btn_save = QPushButton("Simpan & Tutup")
+        btn_save = QPushButton("Simpan")
         btn_save.setStyleSheet(f"background:{COL_ACCENT}; color:white;")
-        btn_save.clicked.connect(lambda: (self._apply(save=True), self.accept()))
-        act_row.addStretch(1)
-        act_row.addWidget(btn_apply)
-        act_row.addWidget(btn_save)
-        lay.addLayout(act_row)
+        btn_save.clicked.connect(lambda: self._apply(save=True))
+        act.addStretch(1)
+        act.addWidget(btn_apply)
+        act.addWidget(btn_save)
+        lay.addLayout(act)
+        return w
+
+    def _apply(self, save):
+        updates = {k: s.value() for k, s in self._spins.items()}
+        self.master.update_calibration(updates, save=save)
+
+    # ---- TAB: MANUAL -------------------------------------------------------
+    def _build_manual_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+
+        # Jog step count untuk jog mentah.
+        steprow = QHBoxLayout()
+        steprow.addWidget(self._lbl("Jog mentah (step):"))
+        self.spin_jog = QSpinBox()
+        self.spin_jog.setRange(10, 2000)
+        self.spin_jog.setSingleStep(50)
+        self.spin_jog.setValue(200)
+        steprow.addWidget(self.spin_jog)
+        steprow.addStretch(1)
+        lay.addLayout(steprow)
+
+        lay.addWidget(self._section("Konveyor"))
+        lay.addLayout(self._btn_row([
+            ("◀ Mundur", COL_INFO,  lambda: self.master.conveyor_manual("rev")),
+            ("▶ Maju",   COL_INFO,  lambda: self.master.conveyor_manual("fwd")),
+            ("■ Stop",   COL_ERROR, lambda: self.master.conveyor_manual("stop")),
+        ]))
+
+        for which, title in (("drain", "Stepper Ukur"), ("sort", "Stepper Sorting")):
+            lay.addWidget(self._section(title))
+            lay.addLayout(self._btn_row([
+                ("◀ Jog mundur", COL_INFO, lambda w=which: self.master.jog_stepper(w, "rev", self.spin_jog.value())),
+                ("▶ Jog maju",   COL_INFO, lambda w=which: self.master.jog_stepper(w, "fwd", self.spin_jog.value())),
+                ("⌂ Ke home",    COL_ACCENT, lambda w=which: self.master.home_stepper(w)),
+            ]))
+
+        lay.addWidget(self._section("Beban DAC"))
+        lay.addLayout(self._btn_row([
+            ("⚡ Beban ON",  COL_WARN,  lambda: self.master.dac_load(True)),
+            ("○ Beban OFF", COL_INFO,  lambda: self.master.dac_load(False)),
+        ]))
+
+        lay.addStretch(1)
+        lay.addLayout(self._btn_row([
+            ("↺ RESET",      COL_SURFACE_ALT, lambda: self.master.send_command("RESET")),
+            ("■ STOP semua", COL_ERROR,       self._stop_all),
+        ]))
+        return w
+
+    def _stop_all(self):
+        self.master.conveyor_manual("stop")
+        self.master.dac_load(False)
+
+    def _section(self, text):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:{COL_HEADING}; font-size:12px; font-weight:800; margin-top:4px;")
+        return l
+
+    def _btn_row(self, specs):
+        row = QHBoxLayout()
+        for label, bg, cb in specs:
+            b = QPushButton(label)
+            fg = COL_HEADING if bg == COL_SURFACE_ALT else "white"
+            border = f"border:1px solid {COL_BORDER};" if bg == COL_SURFACE_ALT else ""
+            b.setStyleSheet(f"background:{bg}; color:{fg}; {border}")
+            b.clicked.connect(cb)
+            row.addWidget(b)
+        return row
 
     def _lbl(self, text):
         l = QLabel(text)
         l.setStyleSheet(f"color:{COL_HEADING}; font-size:12px; font-weight:600;")
         return l
-
-    def _jog(self):
-        # Apply current speed first so the jog reflects the value being tested.
-        self._apply(save=False)
-        self.master.jog_forward()
-
-    def _apply(self, save):
-        self.master.set_calibration(
-            self.spin_speed.value(), self.spin_pulse.value(), save=save)
 
 
 # ----- BRIDGE ---------------------------------------------------------------
@@ -556,6 +726,7 @@ class UIBridge(QObject):
     progress_signal = pyqtSignal(int, str)
     discharge_signal = pyqtSignal(dict)
     status_signal = pyqtSignal(dict)
+    diag_signal = pyqtSignal(dict)             # live diagnostic snapshot (panel)
     init_done_signal = pyqtSignal()
     passport_signal = pyqtSignal(str, str)   # (pdf_path, grade)
 
@@ -585,7 +756,9 @@ class RecellDashboard(QMainWindow):
         self.bridge.progress_signal.connect(self.update_progress)
         self.bridge.discharge_signal.connect(self.update_discharge)
         self.bridge.status_signal.connect(self.update_status)
+        self.bridge.diag_signal.connect(self._on_diag)
         self.bridge.init_done_signal.connect(self._on_master_ready)
+        self._calib_dialog = None
         self.bridge.passport_signal.connect(self._on_passport_ready)
 
         self._init_master(simulate, mock_ai)
@@ -873,6 +1046,7 @@ class RecellDashboard(QMainWindow):
             'on_discharge_sample': self.bridge.discharge_signal.emit,
             'on_status':           self.bridge.status_signal.emit,
             'on_passport':         self.bridge.passport_signal.emit,
+            'on_diag':             self.bridge.diag_signal.emit,
         }
 
         def _bg():
@@ -918,18 +1092,52 @@ class RecellDashboard(QMainWindow):
         for g in ("A", "B", "R"):
             getattr(self, f"btn_override_{g}").setEnabled(True)
 
+    def _exec_dialog_on_top(self, dlg):
+        """Tampilkan dialog modal DI ATAS window utama yang fullscreen.
+
+        Bug lapangan: window fullscreen (mutter menumpuk _NET_WM_STATE_FULLSCREEN
+        di atas window normal) menimbun dialog modal → dialog tak terlihat tapi
+        tetap merebut semua input → UI tampak beku/tak bisa dipencet. Solusi:
+        non-fullscreen-kan main window selama dialog terbuka, paksa dialog di
+        atas + fokus, lalu kembalikan fullscreen."""
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.Dialog | Qt.WindowStaysOnTopHint)
+        was_fs = self.isFullScreen()
+        if was_fs:
+            self.showNormal()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        try:
+            return dlg.exec_()
+        finally:
+            if was_fs:
+                self.showFullScreen()
+
     def _open_serial_config(self):
         if self.master is None:
             return
         dlg = SerialConfigDialog(self.master, parent=self)
-        dlg.exec_()
+        self._exec_dialog_on_top(dlg)
         self.update_status(dict(self.master.status))
 
     def open_calibration(self):
         if self.master is None:
             return
-        CalibrationDialog(self.master, parent=self).exec_()
+        dlg = CalibrationDialog(self.master, parent=self)
+        self._calib_dialog = dlg
+        self.master.start_diag()          # firmware mulai stream sensor live
+        try:
+            self._exec_dialog_on_top(dlg)
+        finally:
+            self.master.stop_diag()
+            self._calib_dialog = None
         self._refresh_calib_label()
+
+    def _on_diag(self, data):
+        """Forward live diagnostic snapshot to the calibration dialog if open."""
+        dlg = self._calib_dialog
+        if dlg is not None:
+            dlg.update_monitor(data)
 
     def _refresh_calib_label(self):
         if self.master is None:
@@ -951,6 +1159,11 @@ class RecellDashboard(QMainWindow):
         if self.cycle_in_progress:
             self.log_msg("[!] Cycle already in progress.")
             return
+        # Cegah dua thread siklus jalan bersamaan kalau thread lama (mis. setelah
+        # Emergency Stop) belum selesai unwinding — keduanya akan rebutan serial.
+        if getattr(self, "_cycle_thread", None) and self._cycle_thread.is_alive():
+            self.log_msg("[!] Siklus sebelumnya masih berhenti — tunggu sebentar lalu START lagi.")
+            return
         self.cycle_in_progress = True
         self.btn_start.setEnabled(False)
 
@@ -971,7 +1184,8 @@ class RecellDashboard(QMainWindow):
                                   bg="#FFFBEB", border="#FDE68A")
 
         self.update_progress(5, "Starting cycle…")
-        threading.Thread(target=self._run_cycle_wrapper, daemon=True).start()
+        self._cycle_thread = threading.Thread(target=self._run_cycle_wrapper, daemon=True)
+        self._cycle_thread.start()
 
     def _run_cycle_wrapper(self):
         try:
@@ -980,7 +1194,9 @@ class RecellDashboard(QMainWindow):
             QTimer.singleShot(0, lambda: self.counter_lbl.setText(str(self._session_count)))
         finally:
             self.cycle_in_progress = False
-            self.bridge.progress_signal.emit(100, "Cycle complete")
+            # Jangan klaim "complete" kalau siklus di-abort (Emergency Stop).
+            if not self.master.abort_cycle:
+                self.bridge.progress_signal.emit(100, "Cycle complete")
             QTimer.singleShot(0, lambda: self.btn_start.setEnabled(True))
 
     def trigger_stop(self):
@@ -993,6 +1209,11 @@ class RecellDashboard(QMainWindow):
         self.update_progress(0, "Aborted")
         self.grade_card.set_state("ABORTED", COL_ERROR_TXT, "Cycle Interrupted",
                                   bg="#FEF2F2", border="#FECACA")
+        # E-stop otoritatif: kembalikan UI ke kondisi bisa-START sekarang juga,
+        # jangan menunggu thread siklus lama unwinding lewat finally-nya. Guard
+        # is_alive di trigger_cycle mencegah dua siklus jalan bersamaan.
+        self.cycle_in_progress = False
+        self.btn_start.setEnabled(True)
 
     # ----- SLOTS ------------------------------------------------------------
     def log_msg(self, msg):
@@ -1144,7 +1365,11 @@ if __name__ == "__main__":
     window = RecellDashboard(simulate=args.sim, mock_ai=args.mock_ai)
     if args.fullscreen:
         screen_geo = app.primaryScreen().geometry()
-        window.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.X11BypassWindowManagerHint)
+        # Frameless seukuran layar, TAPI tetap dikelola WM. JANGAN pakai
+        # X11BypassWindowManagerHint: itu menggambar window langsung di atas
+        # segalanya & melewati WM, sehingga dialog modal (Kalibrasi/Serial) yang
+        # dikelola WM tertimbun di belakang dan mengunci seluruh input.
+        window.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         window.setGeometry(screen_geo)
     window.show()
 

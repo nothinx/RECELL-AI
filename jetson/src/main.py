@@ -465,9 +465,28 @@ class RecellMaster:
 
     def serial_listener(self):
         while self.running:
-            with self._serial_lock:
-                ready = (not self.simulate and self.ser and self.ser.in_waiting > 0)
-                line = self.ser.readline().decode('utf-8', errors='ignore').strip() if ready else None
+            line = None
+            try:
+                with self._serial_lock:
+                    if not self.simulate and self.ser and self.ser.in_waiting > 0:
+                        line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            except (serial.SerialException, OSError) as e:
+                # USB STM32 bisa lepas saat runtime (Errno 5). JANGAN biarkan thread
+                # listener mati — itu membekukan SEMUA RX (siklus berikutnya hang
+                # selamanya menunggu status). Tandai offline; _serial_watchdog reconnect.
+                self.log_msg(f"[Comm] Serial read gagal ({e}) — port offline. Watchdog akan reconnect.")
+                self.status["serial"] = "offline"
+                self.simulate = True
+                try:
+                    if self.ser:
+                        self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+                self._notify_status()
+                self.wait_flag = False        # jangan biarkan siklus aktif tergantung
+                time.sleep(0.5)
+                continue
             if line:
                 self._last_rx = time.time()
                 # Pulih dari status "stale": board bicara lagi.

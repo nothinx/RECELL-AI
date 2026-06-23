@@ -190,6 +190,7 @@ class StatusPill(QFrame):
             "sim":     (COL_INFO,     "SIM"),
             "mock":    (COL_WARN,     "MOCK"),
             "rule":    (COL_WARN,     "RULE"),
+            "stale":   (COL_WARN,     "STALE"),
             "offline": (COL_STANDBY,  "OFFLINE"),
         }
         color, text = states.get(state, states["offline"])
@@ -718,6 +719,122 @@ class CalibrationDialog(QDialog):
         return l
 
 
+class StatsDialog(QDialog):
+    """Dashboard produksi: hitungan hari ini/total, distribusi grade A/B/R,
+    rata-rata waktu siklus. Baca agregat dari grading_log.csv. Plus export
+    semua log + passport ke USB flashdisk untuk operator."""
+    def __init__(self, master, parent=None):
+        super().__init__(parent)
+        self.master = master
+        self.setWindowTitle("Statistik Produksi")
+        self.setMinimumWidth(420)
+        self.setStyleSheet(f"""
+            QDialog {{ background:{COL_BG}; color:{COL_TEXT}; }}
+            QLabel  {{ color:{COL_TEXT}; }}
+            QPushButton {{ border:none; border-radius:8px; padding:9px 14px;
+                           font-weight:700; font-size:12px; }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(8)
+
+        title = QLabel("📊 Statistik Produksi")
+        title.setStyleSheet(f"color:{COL_HEADING}; font-size:16px; font-weight:800;")
+        lay.addWidget(title)
+
+        self.grid = QGridLayout()
+        self.grid.setHorizontalSpacing(20)
+        self.grid.setVerticalSpacing(8)
+        lay.addLayout(self.grid)
+        self._rows = {}
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet(f"color:{COL_MUTED}; font-size:11px; font-weight:600;")
+        self.status_lbl.setWordWrap(True)
+        lay.addSpacing(4)
+        lay.addWidget(self.status_lbl)
+
+        row = QHBoxLayout()
+        btn_refresh = QPushButton("↻ Refresh")
+        btn_refresh.setStyleSheet(
+            f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};")
+        btn_refresh.clicked.connect(self.refresh)
+        btn_export = QPushButton("⬇ Export ke USB")
+        btn_export.setStyleSheet(f"background:{COL_ACCENT}; color:white;")
+        btn_export.clicked.connect(self._export)
+        btn_close = QPushButton("Tutup")
+        btn_close.setStyleSheet(
+            f"background:{COL_SURFACE_ALT}; color:{COL_HEADING}; border:1px solid {COL_BORDER};")
+        btn_close.clicked.connect(self.accept)
+        row.addWidget(btn_refresh)
+        row.addWidget(btn_export)
+        row.addStretch(1)
+        row.addWidget(btn_close)
+        lay.addLayout(row)
+
+        self.refresh()
+
+    def _stat_row(self, r, label, value, big=False):
+        name = QLabel(label)
+        name.setStyleSheet(f"color:{COL_MUTED}; font-size:12px; font-weight:600;")
+        val = QLabel(value)
+        size = 22 if big else 14
+        val.setStyleSheet(f"color:{COL_HEADING}; font-size:{size}px; font-weight:800;")
+        self.grid.addWidget(name, r, 0)
+        self.grid.addWidget(val, r, 1)
+
+    def refresh(self):
+        # Clear grid
+        while self.grid.count():
+            it = self.grid.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        s = self.master.logger.read_stats()
+        grades = s["grades"]
+        a, b = grades.get("A", 0), grades.get("B", 0)
+        r = grades.get("R", 0) + grades.get("REJECT", 0)
+        other = s["total"] - a - b - r
+        self._stat_row(0, "Hari ini", str(s["today"]), big=True)
+        self._stat_row(1, "Total unit", str(s["total"]), big=True)
+        self._stat_row(2, "Grade A", str(a))
+        self._stat_row(3, "Grade B", str(b))
+        self._stat_row(4, "Reject (R)", str(r))
+        if other:
+            self._stat_row(5, "Lainnya", str(other))
+        self._stat_row(6, "Rata-rata siklus", f"{s['avg_cycle_s']} s")
+        self._stat_row(7, "Terakhir", s["last_ts"] or "—")
+        self.status_lbl.setText("")
+
+    def _export(self):
+        import shutil, glob, getpass
+        # Cari mountpoint USB: /media/<user>/* atau /run/media/<user>/*
+        user = getpass.getuser()
+        mounts = (glob.glob(f"/media/{user}/*") + glob.glob("/media/*/*")
+                  + glob.glob(f"/run/media/{user}/*"))
+        mounts = [m for m in mounts if os.path.isdir(m)]
+        if not mounts:
+            self.status_lbl.setText("⚠ Tidak ada USB terdeteksi (/media). Colok flashdisk lalu Refresh.")
+            return
+        dest_root = os.path.join(mounts[0], "RECELL-AI-export")
+        try:
+            os.makedirs(dest_root, exist_ok=True)
+            src = self.master.logger.output_dir
+            n = 0
+            for f in glob.glob(os.path.join(src, "*.csv")):
+                shutil.copy2(f, dest_root); n += 1
+            # Passport PDFs (kalau ada)
+            pdf_dir = getattr(self.master.passport_gen, "output_dir", None)
+            if pdf_dir and os.path.isdir(pdf_dir):
+                pdest = os.path.join(dest_root, "passports")
+                os.makedirs(pdest, exist_ok=True)
+                for f in glob.glob(os.path.join(pdf_dir, "*.pdf")):
+                    shutil.copy2(f, pdest); n += 1
+            self.master.logger.log_event("EXPORT_USB", dest_root)
+            self.status_lbl.setText(f"✓ {n} file ter-export ke {dest_root}")
+        except Exception as e:
+            self.status_lbl.setText(f"⚠ Export gagal: {e}")
+
+
 # ----- BRIDGE ---------------------------------------------------------------
 class UIBridge(QObject):
     frame_signal = pyqtSignal(np.ndarray)
@@ -923,9 +1040,19 @@ class RecellDashboard(QMainWindow):
         )
         self.btn_calib.clicked.connect(self.open_calibration)
 
+        self.btn_stats = QPushButton("📊  STATISTIK")
+        self.btn_stats.setMinimumHeight(46)
+        self.btn_stats.setToolTip("Statistik produksi + export log")
+        self.btn_stats.setStyleSheet(
+            f"background-color:{COL_SURFACE}; color:{COL_HEADING};"
+            f"border:1px solid {COL_BORDER};"
+        )
+        self.btn_stats.clicked.connect(self.open_stats)
+
         btn_row.addWidget(self.btn_start, stretch=2)
         btn_row.addWidget(self.btn_stop, stretch=1)
         btn_row.addWidget(self.btn_calib, stretch=1)
+        btn_row.addWidget(self.btn_stats, stretch=1)
         ctrl_card.body.addLayout(btn_row)
 
         self.calib_lbl = QLabel("Kalibrasi:  —")
@@ -1077,8 +1204,12 @@ class RecellDashboard(QMainWindow):
     def _override_grade(self, grade):
         if self.master is None:
             return
+        prev = self.master.grade_decision
         self.master.override_grade(grade)
         self.grade_card.set_grade(grade)
+        # Audit trail: operator menimpa keputusan AI.
+        bid = self.master.current_battery_id or "?"
+        self.master.logger.log_event("GRADE_OVERRIDE", f"{bid}: {prev}->{grade}")
 
     def _open_passport(self):
         if self._last_pdf_path and Path(self._last_pdf_path).exists():
@@ -1139,6 +1270,11 @@ class RecellDashboard(QMainWindow):
         if dlg is not None:
             dlg.update_monitor(data)
 
+    def open_stats(self):
+        if self.master is None:
+            return
+        self._exec_dialog_on_top(StatsDialog(self.master, parent=self))
+
     def _refresh_calib_label(self):
         if self.master is None:
             return
@@ -1163,6 +1299,13 @@ class RecellDashboard(QMainWindow):
         # Emergency Stop) belum selesai unwinding — keduanya akan rebutan serial.
         if getattr(self, "_cycle_thread", None) and self._cycle_thread.is_alive():
             self.log_msg("[!] Siklus sebelumnya masih berhenti — tunggu sebentar lalu START lagi.")
+            return
+        # Interlock: jangan mulai siklus kalau STM32 offline/simulasi — perintah
+        # akan tertelan & konveyor tak terkendali. "stale" (heartbeat sempat
+        # hilang) tetap diizinkan: perintah START akan menyegarkan status, dan
+        # timeout siklus menangani bila board memang hang.
+        if self.master.status.get("serial") in ("offline", "sim"):
+            self.log_msg("[!] START ditolak: STM32 tidak online (cek koneksi serial).")
             return
         self.cycle_in_progress = True
         self.btn_start.setEnabled(False)

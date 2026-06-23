@@ -112,6 +112,7 @@ class RecellMaster:
         # True jika hardware serial DIMAKSUDKAN ada (bukan --sim). Watchdog hanya
         # mencoba reconnect bila ini True — agar mode simulasi sengaja tak diganggu.
         self._serial_intended = not simulate
+        self._last_rx = time.time()   # waktu RX terakhir (utk deteksi board hang)
         self.mock_ai = mock_ai
         self.running = True
         self.ser = None
@@ -468,10 +469,15 @@ class RecellMaster:
                 ready = (not self.simulate and self.ser and self.ser.in_waiting > 0)
                 line = self.ser.readline().decode('utf-8', errors='ignore').strip() if ready else None
             if line:
+                self._last_rx = time.time()
+                # Pulih dari status "stale": board bicara lagi.
+                if self.status.get("serial") == "stale":
+                    self.status["serial"] = "online"
+                    self._notify_status()
                 # DIAGNOSTIK sementara: lihat persis status STM32 yang masuk &
-                # kapan, untuk debug urutan langkah. DISCHARGE_SAMPLE di-skip
-                # (terlalu sering). Hapus blok ini setelah selesai debug.
-                if "DISCHARGE_SAMPLE" not in line and "DIAG" not in line:
+                # kapan, untuk debug urutan langkah. DISCHARGE_SAMPLE/DIAG/
+                # HEARTBEAT di-skip (terlalu sering).
+                if all(s not in line for s in ("DISCHARGE_SAMPLE", "DIAG", "HEARTBEAT")):
                     self.log_msg(f"[RX] {line}")
                 try:
                     data = json.loads(line)
@@ -588,11 +594,18 @@ class RecellMaster:
         """Merge *updates* into calibration (clamped per CALIB_RANGES), push the
         FULL config to the STM32, and optionally persist. Accepts any subset of
         the DEFAULT_CALIBRATION keys."""
+        changed = []
         for k, v in updates.items():
             if k not in DEFAULT_CALIBRATION:
                 continue
             lo, hi = CALIB_RANGES[k]
-            self.calibration[k] = max(lo, min(hi, int(v)))
+            new = max(lo, min(hi, int(v)))
+            old = self.calibration.get(k)
+            if old != new:
+                changed.append(f"{k}:{old}->{new}")
+            self.calibration[k] = new
+        if changed:                       # audit trail (traceability sertifikasi)
+            self.logger.log_event("CALIB_CHANGE", "; ".join(changed))
         self.send_command("SET_CONFIG", self.calibration)
         if save:
             try:
@@ -913,6 +926,14 @@ class RecellMaster:
             if not self._serial_intended:
                 continue                      # launched with --sim: leave alone
             if self.ser is not None and not self.simulate:
+                # Connected: deteksi board hang (port terbuka tapi MCU diam).
+                # Ambang 12s > operasi blocking firmware terlama (stepper 10s)
+                # agar tak false-alarm saat siklus. Self-recover saat RX masuk.
+                if (self.status.get("serial") == "online"
+                        and time.time() - self._last_rx > 12.0):
+                    self.status["serial"] = "stale"
+                    self.log_msg("[Watchdog] STM32 diam >12s (heartbeat hilang) — board mungkin hang.")
+                    self._notify_status()
                 continue                      # already connected
             available = [dev for dev, _ in self.list_serial_ports()]
             if not any("ACM" in d or "USB" in d for d in available):

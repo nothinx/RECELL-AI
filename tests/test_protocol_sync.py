@@ -17,18 +17,26 @@ JETSON_TX = MAIN + "\n" + UI  # command sends may live in the controller OR the 
 COMMANDS = [
     "RESET", "MOVE_TO_PROX_1", "APPLY_SENSOR_AND_MEASURE",
     "MOVE_TO_PROX_2", "EJECT_A", "MOVE_TO_END", "STOP_CONVEYOR",
+    # Panel diagnostik / kalibrasi (sesi 2026-06-23)
+    "START_DIAG", "STOP_DIAG", "JOG_STEPPER", "HOME_STEPPER", "CONVEYOR", "DAC_LOAD",
 ]
 # Status yang dipancarkan firmware (semua), dan subset yang ditindaklanjuti Jetson.
 STATUSES_EMITTED = [
     "BOOT_OK", "AT_PROX_1", "AT_PROX_2", "DISCHARGE_SAMPLE", "MEASUREMENT_DONE",
     "EJECTED_A", "DROPPED_B", "STOPPED", "RESET_OK", "EMERGENCY_STOP", "STEP_TIMEOUT",
+    "DIAG", "HEARTBEAT", "DIAG_ON", "DIAG_OFF", "JOG_DONE", "HOME_DONE", "DAC_SET",
 ]
 STATUSES_CONSUMED = [
     "MEASUREMENT_DONE", "DISCHARGE_SAMPLE", "AT_PROX_1", "AT_PROX_2",
-    "EJECTED_A", "DROPPED_B", "EMERGENCY_STOP", "STEP_TIMEOUT",
+    "EJECTED_A", "DROPPED_B", "EMERGENCY_STOP", "STEP_TIMEOUT", "DIAG", "HEARTBEAT",
 ]
 MEASUREMENT_FIELDS = ["volt", "curr", "v_resting", "temp_pre", "temp_post", "temp_delta"]
 DISCHARGE_FIELDS = ["t_ms", "volt", "curr", "temp"]
+# SET_CONFIG: nama field harus cocok di firmware (doc[...]) & DEFAULT_CALIBRATION.
+CONFIG_FIELDS = [
+    "conveyor_speed", "step_pulse_us", "ramp_start_us", "ramp_steps",
+    "dac_load", "discharge_samples", "discharge_period", "ir2_settle",
+]
 
 
 def test_every_command_handled_by_firmware():
@@ -61,6 +69,12 @@ def test_discharge_fields_match_both_sides():
     for f in DISCHARGE_FIELDS:
         assert f'"{f}"' in FW, f"firmware DISCHARGE_SAMPLE tak punya field {f}"
         assert f'"{f}"' in MAIN, f"main.py tak membaca field {f}"
+
+
+def test_config_fields_match_both_sides():
+    for f in CONFIG_FIELDS:
+        assert f'"{f}"' in FW, f"firmware SET_CONFIG tak baca field {f}"
+        assert f'"{f}"' in MAIN, f"DEFAULT_CALIBRATION tak punya field {f}"
 
 
 if __name__ == "__main__":

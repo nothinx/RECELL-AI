@@ -67,6 +67,41 @@ else
   pip install --no-index --find-links="$WHEELHOUSE" -r jetson/requirements-jetson-runtime.txt
 fi
 
+# 3b. Perbaikan ABI JetPack 6.2.x — HANYA bila perlu (idempotent, best-effort).
+#     venv --system-site-packages mewarisi numpy 1.x sistem, sedang torch 2.11
+#     bawa numpy 2.x & butuh libcudss yg tak ada di apt. Tanpa ini service crash
+#     (lihat memori sesi 2026-06-23). Aman di-skip pada JetPack yang tak terdampak.
+echo "[*] Cek ABI JetPack 6.2 (libcudss + numpy2)..."
+if ! python -c "import torch" 2>/dev/null; then
+  echo "    torch gagal import — coba perbaikan libcudss..."
+  if $ONLINE; then
+    pip install --no-deps nvidia-cudss-cu12==0.8.0.10 || true
+  else
+    pip install --no-index --find-links="$WHEELHOUSE" --no-deps nvidia-cudss-cu12 || true
+  fi
+  CUDSS=$(python - <<'PY'
+import glob, os, site
+for r in site.getsitepackages():
+    h = glob.glob(os.path.join(r, "**", "libcudss.so.0"), recursive=True)
+    if h:
+        print(h[0]); break
+PY
+)
+  TORCHLIB=$(python -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__),'lib'))" 2>/dev/null || true)
+  if [ -n "$CUDSS" ] && [ -n "$TORCHLIB" ] && [ ! -e "$TORCHLIB/libcudss.so.0" ]; then
+    ln -s "$CUDSS" "$TORCHLIB/libcudss.so.0" && echo "    + symlink libcudss -> $TORCHLIB"
+  fi
+fi
+# numpy 2 ABI: paksa matplotlib/scipy/pandas masuk venv (timpa numpy 1.x sistem).
+if ! python -c "import matplotlib, scipy, pandas" 2>/dev/null; then
+  echo "    matplotlib/scipy/pandas bentrok numpy — paksa ke venv (--ignore-installed)..."
+  if $ONLINE; then
+    pip install -U --ignore-installed matplotlib scipy pandas || true
+  else
+    pip install --no-index --find-links="$WHEELHOUSE" -U --ignore-installed matplotlib scipy pandas || true
+  fi
+fi
+
 # 4. Matikan ultralytics telemetry (persists ke ~/.config/Ultralytics/settings.yaml)
 echo "[*] Matikan ultralytics telemetry..."
 python -c "from ultralytics import settings; settings.update({'sync': False})" || \
@@ -123,7 +158,7 @@ User=${SERVICE_USER}
 WorkingDirectory=${ROOT_DIR}/jetson/src
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/${SERVICE_USER}/.Xauthority
-ExecStart=${ROOT_DIR}/venv/bin/python ui_dashboard.py
+ExecStart=${ROOT_DIR}/jetson/scripts/launch_dashboard.sh
 Restart=on-failure
 RestartSec=5
 

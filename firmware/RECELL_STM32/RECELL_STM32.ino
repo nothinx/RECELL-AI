@@ -71,6 +71,11 @@ bool diagMode                    = false;
 unsigned long lastDiagMs         = 0;
 const unsigned long DIAG_PERIOD_MS = 200;
 bool dacManualOn                 = false; // status beban DAC (utk telemetri diag)
+
+// Heartbeat: denyut ~1Hz supaya Jetson bisa deteksi board hang/diam (beda dari
+// kabel lepas). Tak dikirim saat diagMode (snapshot DIAG sudah jadi denyut).
+unsigned long lastBeatMs         = 0;
+const unsigned long BEAT_PERIOD_MS = 1000;
 const unsigned long END_OF_LINE_MS = 5000;
 const unsigned long STEPPER_TIMEOUT_MS = 10000; // stall guard: limit tak kunjung kena
 const unsigned long PROX_TIMEOUT_MS    = 25000; // guard: IR tak terdeteksi (baterai nyangkut)
@@ -182,6 +187,13 @@ void loop() {
   if (diagMode && millis() - lastDiagMs >= DIAG_PERIOD_MS) {
     lastDiagMs = millis();
     sendDiag();
+  }
+
+  // Heartbeat ~1Hz (kecuali diagMode yg sudah memancar). Jetson pakai ini utk
+  // deteksi board hang (port terbuka tapi MCU diam).
+  if (!diagMode && millis() - lastBeatMs >= BEAT_PERIOD_MS) {
+    lastBeatMs = millis();
+    sendTelemetry(0, 0, "HEARTBEAT");
   }
 }
 

@@ -109,6 +109,9 @@ BATTERY_PRESENT_FRAMES = 3
 class RecellMaster:
     def __init__(self, simulate=False, mock_ai=False, ui_callbacks=None):
         self.simulate = simulate
+        # True jika hardware serial DIMAKSUDKAN ada (bukan --sim). Watchdog hanya
+        # mencoba reconnect bila ini True — agar mode simulasi sengaja tak diganggu.
+        self._serial_intended = not simulate
         self.mock_ai = mock_ai
         self.running = True
         self.ser = None
@@ -894,9 +897,31 @@ class RecellMaster:
     def run(self):
         threading.Thread(target=self.vision_thread, daemon=True).start()
         threading.Thread(target=self.serial_listener, daemon=True).start()
+        threading.Thread(target=self._serial_watchdog, daemon=True).start()
         if not self.ui_callbacks:
             self.interactive_cli()
             self.log_msg("[System] Shutting down...")
+
+    def _serial_watchdog(self):
+        """Auto-reconnect serial USB. Field units lose the STM32 USB link
+        intermittently; a write failure in send_command marks the port offline
+        (simulate=True). This watchdog notices that and reconnects as soon as a
+        ttyACM/ttyUSB port reappears — STOP_CONVEYOR is sent first so a board
+        that was left running is brought to a safe stop on recovery."""
+        while self.running:
+            time.sleep(2.0)
+            if not self._serial_intended:
+                continue                      # launched with --sim: leave alone
+            if self.ser is not None and not self.simulate:
+                continue                      # already connected
+            available = [dev for dev, _ in self.list_serial_ports()]
+            if not any("ACM" in d or "USB" in d for d in available):
+                continue                      # no port yet — wait quietly
+            port = self._pick_serial_port()
+            self.log_msg(f"[Watchdog] Serial port {port} kembali — mencoba reconnect…")
+            if self.reconnect_serial(port, BAUD_RATE):
+                self.send_command("STOP_CONVEYOR")   # safety on recovery
+                self.log_msg("[Watchdog] Reconnect sukses, konveyor di-STOP.")
 
     def interactive_cli(self):
         print("\n--- Hardware Test Menu ---")

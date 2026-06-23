@@ -31,3 +31,6 @@ data/
 
 # Secret per-device passport signing key (auto-generated, never commit)
 jetson/config/passport_key.txt
+
+# Dataset capture (gambar mentah — anotasi & simpan di Roboflow, jangan commit)
+datasets/

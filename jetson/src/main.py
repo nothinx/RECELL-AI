@@ -63,6 +63,15 @@ CAM_HEIGHT = int(os.environ.get("CAM_HEIGHT", 480))
 CAM_FOCUS = int(os.environ.get("CAM_FOCUS", 115))  # 0-255 step 5; -1 = biarkan autofocus
 YOLO_ENGINE_PATH = MODELS_DIR / "weights" / "best.engine"   # preferred on Jetson
 YOLO_PT_PATH = MODELS_DIR / "weights" / "best.pt"           # fallback (dev / non-Jetson)
+# Model CLASSIFICATION (kondisi baterai) — diutamakan bila ada. Kelas termasuk
+# KOSONG (belt kosong) → kehadiran ditangani model, bukan IR (tak ada IR di bawah
+# kamera). Lihat docs: pivot detection→classification 2026-06-24.
+YOLO_CLS_ENGINE_PATH = MODELS_DIR / "weights" / "best_cls.engine"
+YOLO_CLS_PT_PATH     = MODELS_DIR / "weights" / "best_cls.pt"
+YOLO_CLS_IMGSZ = 224
+EMPTY_CLASS = "KOSONG"                                       # kelas "tak ada baterai"
+CLS_SCORE = {"SEHAT": 1.0, "KARAT": 0.5, "SOBEK": 0.0}      # → vision_score (calculate_final_grade)
+CLS_CONF = 0.50                                             # ambang confidence agar dipercaya
 XGB_MODEL_PATH = MODELS_DIR / "weights" / "soh_xgb_model.json"
 CALIB_PATH = BASE_DIR / "calibration.json"
 
@@ -134,6 +143,7 @@ class RecellMaster:
         self._last_ui_emit = 0.0  # throttle frame push to UI (lihat UI_FRAME_INTERVAL)
         # Deteksi kehadiran baterai di bawah kamera (hulu) untuk vision-gated cycle.
         self.battery_in_view = False
+        self._cls_label = None      # kelas classification dominan (selain KOSONG)
         self._battery_frames = 0
         self.current_battery_id = None
         # Count how many frames in the current cycle saw each label, so a
@@ -158,6 +168,8 @@ class RecellMaster:
 
         # Initialize Vision (YOLO)
         self.model = None
+        self.is_cls = False                 # True bila model classification
+        self.imgsz = YOLO_IMGSZ
         if not self.mock_ai:
             # Matikan telemetry/sync SEBELUM init — mencegah HTTP call di Jetson air-gapped.
             # setup.sh sudah mempersistnya ke ~/.config/Ultralytics/settings.yaml, tapi
@@ -169,17 +181,28 @@ class RecellMaster:
                 pass
             try:
                 from ultralytics import YOLO
-                if YOLO_ENGINE_PATH.exists():
-                    self.log_msg(f"[AI] Loading TensorRT engine: {YOLO_ENGINE_PATH}")
+                if YOLO_CLS_ENGINE_PATH.exists():
+                    self.log_msg(f"[AI] Loading TensorRT CLASSIFY engine: {YOLO_CLS_ENGINE_PATH}")
+                    self.model = YOLO(str(YOLO_CLS_ENGINE_PATH), task="classify")
+                    self.is_cls = True
+                elif YOLO_CLS_PT_PATH.exists():
+                    self.log_msg(f"[AI] Loading PyTorch CLASSIFY model: {YOLO_CLS_PT_PATH}")
+                    self.model = YOLO(str(YOLO_CLS_PT_PATH))
+                    self.is_cls = True
+                elif YOLO_ENGINE_PATH.exists():
+                    self.log_msg(f"[AI] Loading TensorRT detect engine: {YOLO_ENGINE_PATH}")
                     self.model = YOLO(str(YOLO_ENGINE_PATH), task="detect")
                 elif YOLO_PT_PATH.exists():
                     self.log_msg(f"[AI] Loading PyTorch model: {YOLO_PT_PATH}")
                     self.model = YOLO(str(YOLO_PT_PATH))
+                    self.is_cls = (getattr(self.model, "task", "") == "classify")
                 else:
                     raise FileNotFoundError(
-                        f"No model found at {YOLO_ENGINE_PATH} or {YOLO_PT_PATH}"
+                        f"No model found at {YOLO_CLS_PT_PATH} / {YOLO_PT_PATH}"
                     )
-                self.log_msg(f"[AI] YOLO classes: {self.model.names}")
+                self.imgsz = YOLO_CLS_IMGSZ if self.is_cls else YOLO_IMGSZ
+                self.log_msg(f"[AI] mode={'CLASSIFY' if self.is_cls else 'DETECT'} "
+                             f"imgsz={self.imgsz} classes={self.model.names}")
                 self.status["yolo"] = "online"
             except Exception as e:
                 self.log_msg(f"[AI] Failed to load YOLO ({e}). Falling back to MOCK_AI.")
@@ -365,7 +388,8 @@ class RecellMaster:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
         self.status["camera"] = "online"
         self._notify_status()
-        self.log_msg(f"[Camera] Kamera aktif, inferensi YOLO (imgsz={YOLO_IMGSZ}, conf={YOLO_CONF}).")
+        self.log_msg(f"[Camera] Kamera aktif, inferensi YOLO (imgsz={self.imgsz}, "
+                     f"mode={'CLS' if self.is_cls else 'DET'}).")
 
         focus_locked = False  # kunci fokus SETELAH stream jalan (lihat _lock_focus)
         try:
@@ -380,7 +404,7 @@ class RecellMaster:
                     self._lock_focus()
                     focus_locked = True
                 try:
-                    results = self.model(frame, imgsz=YOLO_IMGSZ, conf=YOLO_CONF, verbose=False)
+                    results = self.model(frame, imgsz=self.imgsz, conf=YOLO_CONF, verbose=False)
                     annotated_frame = results[0].plot()
                     self.latest_frame = annotated_frame.copy()
                     # Throttle ke UI agar thread GUI tidak kebanjiran (lihat
@@ -404,6 +428,10 @@ class RecellMaster:
                 time.sleep(1)
 
     def process_ai_results(self, results):
+        if self.is_cls:
+            self._process_cls(results)
+            return
+        # ---- DETECTION (model lama, fallback) ----
         # Count each label at most once per frame: many boxes of the same
         # class shouldn't multiply the penalty.
         labels_this_frame = set()
@@ -439,8 +467,33 @@ class RecellMaster:
             score = 0.0
         self.vision_score = max(0.0, min(1.0, score))
 
+    def _process_cls(self, results):
+        """Classification: kehadiran = top-1 != KOSONG (confident & persisten);
+        vision_score dari kelas dominan (SEHAT/KARAT/SOBEK)."""
+        probs = getattr(results[0], "probs", None) if results else None
+        if probs is None:
+            return
+        label = self.model.names[int(probs.top1)]
+        confident = float(probs.top1conf) >= CLS_CONF
+        if confident and label != EMPTY_CLASS:
+            self._battery_frames += 1
+            self.defect_frame_counts[label] += 1
+        else:
+            self._battery_frames = 0
+        self.battery_in_view = self._battery_frames >= BATTERY_PRESENT_FRAMES
+        graded = [(l, c) for l, c in self.defect_frame_counts.items()
+                  if l != EMPTY_CLASS and c >= DEFECT_PERSIST_FRAMES]
+        if graded:
+            self._cls_label = max(graded, key=lambda x: x[1])[0]
+            self.vision_score = CLS_SCORE.get(self._cls_label, 1.0)
+        else:
+            self._cls_label = None
+            self.vision_score = 1.0
+
     def get_confirmed_defects(self):
         """Defect labels that passed the per-frame persistence threshold."""
+        if self.is_cls:
+            return [self._cls_label] if self._cls_label in ("KARAT", "SOBEK") else []
         return sorted(
             lbl for lbl, c in self.defect_frame_counts.items()
             if c >= DEFECT_PERSIST_FRAMES

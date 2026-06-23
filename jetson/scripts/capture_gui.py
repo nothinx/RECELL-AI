@@ -44,7 +44,7 @@ class CaptureGUI(QWidget):
             (self.out_root / c).mkdir(parents=True, exist_ok=True)
 
         self.cap = open_camera(index)
-        self.cap.read(); time.sleep(0.3); lock_focus(index)
+        self.cap.read(); time.sleep(0.3); lock_focus(self.cap, index)
         self._last_frame = None
 
         self.setWindowTitle("RECELL-AI · Capture Dataset")

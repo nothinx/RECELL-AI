@@ -19,6 +19,7 @@ MODE (default = BURST per-picu, cocok untuk ubah posisi/baterai tiap kali):
 ponytail: standalone & cv2-only — tak impor main.py (hindari load torch/ultralytics).
 """
 import argparse
+import platform
 import subprocess
 import time
 from datetime import datetime
@@ -27,12 +28,15 @@ from pathlib import Path
 import cv2
 
 CAM_WIDTH, CAM_HEIGHT, CAM_FOCUS = 848, 480, 115  # mirror jetson/src/main.py
+IS_WINDOWS = platform.system() == "Windows"
 
 
 def open_camera(index):
-    cap = cv2.VideoCapture(index)
+    # DSHOW di Windows lebih andal untuk set resolusi/fourcc/fokus; CAP_ANY di Linux.
+    backend = cv2.CAP_DSHOW if IS_WINDOWS else cv2.CAP_ANY
+    cap = cv2.VideoCapture(index, backend)
     if not cap.isOpened():
-        raise SystemExit(f"[!] Kamera index {index} gagal dibuka (service recell masih jalan?).")
+        raise SystemExit(f"[!] Kamera index {index} gagal dibuka (kabel USB tercolok? aplikasi lain pakai kamera?).")
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
@@ -40,7 +44,16 @@ def open_camera(index):
     return cap
 
 
-def lock_focus(index):
+def lock_focus(cap, index):
+    """Kunci fokus agar konsisten dgn produksi. Linux: v4l2-ctl; Windows: prop OpenCV.
+    Best-effort — cek ketajaman di preview; sesuaikan CAM_FOCUS bila perlu."""
+    if IS_WINDOWS:
+        try:
+            cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            cap.set(cv2.CAP_PROP_FOCUS, CAM_FOCUS)
+        except Exception:
+            pass
+        return
     dev = f"/dev/video{index}"
     for ctrl in ("focus_automatic_continuous=0", f"focus_absolute={CAM_FOCUS}"):
         subprocess.run(["v4l2-ctl", "-d", dev, "-c", ctrl],
@@ -82,7 +95,7 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = open_camera(args.index)
-    cap.read(); time.sleep(0.3); lock_focus(args.index)  # fokus nempel setelah stream jalan
+    cap.read(); time.sleep(0.3); lock_focus(cap, args.index)  # fokus nempel setelah stream jalan
 
     n = sum(1 for _ in out_dir.glob("*.jpg"))  # lanjut dari yang sudah ada
     print(f"[capture] ke {out_dir} (sudah ada {n}).")

@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QSpinBox,
 )
 
-from capture_dataset import open_camera, lock_focus, IS_WINDOWS  # reuse setelan kamera
+from capture_dataset import open_camera, lock_focus, detect_camera_index, IS_WINDOWS  # reuse setelan kamera
 
 CLASSES = ["KOSONG", "SEHAT", "KARAT", "SOBEK"]
 COLORS = {"KOSONG": "#64748B", "SEHAT": "#10B981", "KARAT": "#F59E0B", "SOBEK": "#EF4444"}
@@ -234,11 +234,15 @@ class CaptureGUI(QWidget):
 def main():
     ap = argparse.ArgumentParser(description="GUI capture dataset (single-label).")
     ap.add_argument("--out", default="datasets/capture")
-    ap.add_argument("--index", type=int, default=0)
+    ap.add_argument("--index", type=int, default=-1, help="indeks kamera; -1 = auto-deteksi USB rig")
     args = ap.parse_args()
+    index = args.index
+    if index < 0:
+        index = detect_camera_index()
+        index = 0 if index is None else index
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    w = CaptureGUI(args.out, args.index)
+    w = CaptureGUI(args.out, index)
     w.show()
     sys.exit(app.exec_())
 

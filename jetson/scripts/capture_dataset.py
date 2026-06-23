@@ -60,6 +60,26 @@ def lock_focus(cap, index):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def detect_camera_index(prefer=("logitech", "c930")):
+    """Windows: pilih index kamera rig via nama DShow (hindari webcam bawaan).
+    Butuh pygrabber (opsional). Return int, atau None -> pemanggil pakai default."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+        names = [n.lower() for n in FilterGraph().get_input_devices()]
+    except Exception:
+        return None
+    for i, n in enumerate(names):           # 1) cocok kamera rig (Logitech/C930)
+        if any(p in n for p in prefer):
+            return i
+    avoid = ("integrated", "chicony", "built-in", "internal")
+    for i, n in enumerate(names):           # 2) kamera pertama yang bukan bawaan
+        if not any(a in n for a in avoid):
+            return i
+    return None
+
+
 def save(frame, out_dir, n):
     name = out_dir / f"cap_{datetime.now():%Y%m%d-%H%M%S}-{n:04d}.jpg"
     cv2.imwrite(str(name), frame)
@@ -83,7 +103,7 @@ def grab_burst(cap, out_dir, n, count, delay):
 def main():
     ap = argparse.ArgumentParser(description="Capture dataset gambar dari kamera rig.")
     ap.add_argument("--out", default="datasets/capture", help="folder tujuan JPG")
-    ap.add_argument("--index", type=int, default=0, help="indeks /dev/videoN")
+    ap.add_argument("--index", type=int, default=-1, help="indeks kamera; -1 = auto-deteksi USB rig")
     ap.add_argument("--burst", type=int, default=8, help="jumlah gambar per picu (ENTER/SPACE)")
     ap.add_argument("--burst-delay", type=float, default=0.15, help="detik antar-frame dalam satu burst")
     ap.add_argument("--auto", action="store_true", help="mode interval otomatis (tanpa picu)")
@@ -94,8 +114,13 @@ def main():
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cap = open_camera(args.index)
-    cap.read(); time.sleep(0.3); lock_focus(cap, args.index)  # fokus nempel setelah stream jalan
+    index = args.index
+    if index < 0:
+        index = detect_camera_index()
+        index = 0 if index is None else index
+        print(f"[capture] auto-pilih kamera index {index}")
+    cap = open_camera(index)
+    cap.read(); time.sleep(0.3); lock_focus(cap, index)  # fokus nempel setelah stream jalan
 
     n = sum(1 for _ in out_dir.glob("*.jpg"))  # lanjut dari yang sudah ada
     print(f"[capture] ke {out_dir} (sudah ada {n}).")

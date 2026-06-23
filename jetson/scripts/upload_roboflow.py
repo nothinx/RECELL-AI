@@ -30,8 +30,8 @@ def _key():
 
 def main():
     ap = argparse.ArgumentParser(description="Upload gambar ke Roboflow.")
-    ap.add_argument("--workspace", required=True, help="slug workspace Roboflow")
-    ap.add_argument("--project", required=True, help="slug project Roboflow")
+    ap.add_argument("--workspace", default="legacy-gyzej", help="slug workspace Roboflow")
+    ap.add_argument("--project", default="baterai-legacy", help="slug project Roboflow")
     ap.add_argument("--folder", default="datasets/capture", help="folder berisi *.jpg")
     ap.add_argument("--api-key", default=_key(),
                     help="default dari env ROBOFLOW_API_KEY atau jetson/.roboflow_key")

@@ -41,3 +41,6 @@ jetson/.roboflow_key
 
 # venv terisolasi untuk roboflow upload (jangan commit)
 .venv_rf/
+
+# Notebook ber-API-key (jangan commit)
+*_READY.ipynb

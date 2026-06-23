@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QWidget, QFrame, QPlainTextEdit, QProgressBar, QSizePolicy, QGraphicsDropShadowEffect,
     QDialog, QComboBox, QSpinBox, QDialogButtonBox, QListWidget, QListWidgetItem,
-    QFormLayout, QTabWidget, QGridLayout,
+    QFormLayout, QTabWidget, QGridLayout, QMessageBox,
 )
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QImage, QPixmap, QColor
@@ -1285,8 +1285,20 @@ class RecellDashboard(QMainWindow):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F12:
             self.open_calibration()
+        elif event.key() == Qt.Key_Q and event.modifiers() & Qt.ControlModifier:
+            # Satu-satunya jalan keluar di mode fullscreen frameless (tak ada
+            # tombol close OS). Konfirmasi agar operator tak menutup tak sengaja.
+            self._confirm_quit()
         else:
             super().keyPressEvent(event)
+
+    def _confirm_quit(self):
+        if QMessageBox.question(
+                self, "Keluar RECELL-AI",
+                "Yakin keluar dari aplikasi?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) == QMessageBox.Yes:
+            self.close()   # closeEvent menghentikan master
 
     def trigger_cycle(self):
         if self.master is None:

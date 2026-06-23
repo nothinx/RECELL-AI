@@ -34,3 +34,7 @@ jetson/config/passport_key.txt
 
 # Dataset capture (gambar mentah — anotasi & simpan di Roboflow, jangan commit)
 datasets/
+
+# Roboflow API key lokal — RAHASIA, jangan commit
+.roboflow_key
+jetson/.roboflow_key

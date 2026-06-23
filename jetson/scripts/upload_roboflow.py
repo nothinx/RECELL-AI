@@ -19,14 +19,22 @@ import os
 import sys
 from pathlib import Path
 
+# File key lokal (gitignored) — supaya tak usah export tiap kali. Jangan commit.
+KEY_FILE = Path(__file__).resolve().parents[1] / ".roboflow_key"   # jetson/.roboflow_key
+
+
+def _key():
+    return os.environ.get("ROBOFLOW_API_KEY") or (
+        KEY_FILE.read_text().strip() if KEY_FILE.exists() else None)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Upload gambar ke Roboflow.")
     ap.add_argument("--workspace", required=True, help="slug workspace Roboflow")
     ap.add_argument("--project", required=True, help="slug project Roboflow")
     ap.add_argument("--folder", default="datasets/capture", help="folder berisi *.jpg")
-    ap.add_argument("--api-key", default=os.environ.get("ROBOFLOW_API_KEY"),
-                    help="default dari env ROBOFLOW_API_KEY")
+    ap.add_argument("--api-key", default=_key(),
+                    help="default dari env ROBOFLOW_API_KEY atau jetson/.roboflow_key")
     ap.add_argument("--split", default="train", choices=["train", "valid", "test"])
     args = ap.parse_args()
 

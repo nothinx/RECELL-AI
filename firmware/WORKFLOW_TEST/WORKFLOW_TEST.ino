@@ -79,7 +79,7 @@ const int PIN_I2C_SCL       = PB6;
 
 const uint8_t ADDR_INA226   = 0x40;
 const uint8_t ADDR_MLX90614 = 0x5A;
-const uint8_t ADDR_MCP4725  = 0x62;
+const uint8_t ADDR_MCP4725  = 0x60; // default A0->GND (scan: 0x60)
 
 const float INA_SHUNT_OHM   = 0.002;
 const float INA_MAX_AMP     = 10.0;

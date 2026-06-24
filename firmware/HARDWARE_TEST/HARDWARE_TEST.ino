@@ -60,7 +60,7 @@ const int PIN_I2C_SCL       = PB6;
 // Alamat I2C
 const uint8_t ADDR_INA226   = 0x40;
 const uint8_t ADDR_MLX90614 = 0x5A;
-const uint8_t ADDR_MCP4725  = 0x62;
+const uint8_t ADDR_MCP4725  = 0x60; // default A0->GND (scan: 0x60)
 
 // Shunt INA226 -- WAJIB disesuaikan dengan board Anda, kalau salah arus salah.
 const float INA_SHUNT_OHM   = 0.002;  // ohm

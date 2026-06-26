@@ -919,6 +919,12 @@ class RecellMaster:
         )
         self.log_msg(f"[Log] Grading row appended to {self.logger.grading_path}")
 
+        # Result is fully done & persisted here; routing below is mechanical
+        # cleanup. Tell the UI now so the operator can open the passport and
+        # START the next battery without waiting for (or aborting) the sort.
+        if pdf_path and 'on_passport' in self.ui_callbacks:
+            self.ui_callbacks['on_passport'](pdf_path, self.grade_decision)
+
         if self.grade_decision == "A":
             self.log_msg("[6] Routing to Grade A Bin (PROX 2)...")
             self.wait_flag = True
@@ -939,8 +945,6 @@ class RecellMaster:
                 return
 
         self.log_msg("--- Cycle Complete ---")
-        if pdf_path and 'on_passport' in self.ui_callbacks:
-            self.ui_callbacks['on_passport'](pdf_path, self.grade_decision)
 
     def _aborted(self):
         if self.abort_cycle:

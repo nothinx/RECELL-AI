@@ -251,7 +251,7 @@ class GradeCard(Card):
         inner_lay.setSpacing(4)
 
         self.value_lbl = QLabel("STANDBY")
-        f = QFont("Inter", 52, QFont.Black)
+        f = QFont("Inter", 46, QFont.Black)
         self.value_lbl.setFont(f)
         self.value_lbl.setAlignment(Qt.AlignCenter)
         self.value_lbl.setStyleSheet(
@@ -897,6 +897,7 @@ class UIBridge(QObject):
     jog_end_signal = pyqtSignal(str)           # jog-to-limit ended: LIMIT_HIT/JOG_STOPPED/STEP_TIMEOUT
     init_done_signal = pyqtSignal()
     passport_signal = pyqtSignal(str, str)   # (pdf_path, grade)
+    cycle_done_signal = pyqtSignal(int)      # cycle thread exited (carries its generation)
 
 
 # ----- MAIN WINDOW ----------------------------------------------------------
@@ -909,6 +910,7 @@ class RecellDashboard(QMainWindow):
         self.setStyleSheet(GLOBAL_QSS)
 
         self.cycle_in_progress = False
+        self._cycle_gen = 0         # bump tiap START; finally lama abaikan diri bila bukan generasi terkini
         self.master = None          # set oleh _init_master_bg setelah load selesai
         self._session_count = 0
         self.discharge_t = []
@@ -929,6 +931,7 @@ class RecellDashboard(QMainWindow):
         self.bridge.init_done_signal.connect(self._on_master_ready)
         self._calib_dialog = None
         self.bridge.passport_signal.connect(self._on_passport_ready)
+        self.bridge.cycle_done_signal.connect(self._cycle_thread_finished)
 
         self._init_master(simulate, mock_ai)
 
@@ -975,7 +978,7 @@ class RecellDashboard(QMainWindow):
         self.counter_lbl.setAlignment(Qt.AlignCenter)
         counter_sub = QLabel("BATERAI SESI INI")
         counter_sub.setStyleSheet(
-            f"color:{COL_MUTED}; font-size:9px; letter-spacing:1.5px; font-weight:700;"
+            f"color:{COL_MUTED}; font-size:10px; letter-spacing:1.2px; font-weight:700;"
         )
         counter_sub.setAlignment(Qt.AlignCenter)
         counter_box.addWidget(self.counter_lbl)
@@ -993,7 +996,7 @@ class RecellDashboard(QMainWindow):
         self.clock_lbl.setAlignment(Qt.AlignCenter)
         clock_date = QLabel(time.strftime("%d %b %Y"))
         clock_date.setStyleSheet(
-            f"color:{COL_MUTED}; font-size:9px; letter-spacing:1px; font-weight:600;"
+            f"color:{COL_MUTED}; font-size:10px; letter-spacing:1px; font-weight:600;"
         )
         clock_date.setAlignment(Qt.AlignCenter)
         clock_box.addWidget(self.clock_lbl)
@@ -1179,21 +1182,40 @@ class RecellDashboard(QMainWindow):
                          accent=COL_ACCENT)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground(COL_SURFACE)
-        self.plot_widget.setLabel('left', 'Voltage (V)', color=COL_ACCENT, size='10pt')
-        self.plot_widget.setLabel('bottom', 'Time (ms)', color=COL_MUTED, size='10pt')
-        for ax in ("left", "bottom"):
-            axis = self.plot_widget.getAxis(ax)
-            axis.setPen(pg.mkPen(COL_BORDER))
-            axis.setTextPen(pg.mkPen(COL_HEADING))
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
-        self.plot_widget.addLegend(offset=(10, 8), labelTextColor=COL_HEADING,
-                                   brush=pg.mkBrush('#FFFFFFE6'),
-                                   pen=pg.mkPen(COL_BORDER))
+        p1 = self.plot_widget.getPlotItem()
+        # Voltage discharge only moves ~0.1 V while current sits flat at ~1 A.
+        # On a shared axis the 1 A line forces the range to ~0–4 V and squashes
+        # the voltage curve into a straight line. Give current its own right-hand
+        # axis/viewbox so each trace auto-ranges to its own scale and the
+        # discharge shape is actually visible. Axis labels are colour-coded to
+        # the traces — that replaces a floating legend (which overlapped the plot).
+        # Unit in the label text (not units=) so pyqtgraph doesn't SI-prefix the
+        # axis — 2000 ms would otherwise display as "kms" / 2 k.
+        p1.setLabel('left', 'Voltage (V)', color=COL_ACCENT_TXT, size='10pt')
+        p1.setLabel('bottom', 'Time (ms)', color=COL_MUTED, size='10pt')
+        p1.showGrid(x=True, y=True, alpha=0.18)
+        p1.getAxis('left').setPen(pg.mkPen(COL_BORDER))
+        p1.getAxis('left').setTextPen(pg.mkPen(COL_ACCENT_TXT))
+        p1.getAxis('bottom').setPen(pg.mkPen(COL_BORDER))
+        p1.getAxis('bottom').setTextPen(pg.mkPen(COL_HEADING))
+
+        self._vb_i = pg.ViewBox()
+        p1.showAxis('right')
+        p1.scene().addItem(self._vb_i)
+        p1.getAxis('right').linkToView(self._vb_i)
+        self._vb_i.setXLink(p1)
+        p1.getAxis('right').setLabel('Current (A)', color=COL_INFO_TXT)
+        p1.getAxis('right').setPen(pg.mkPen(COL_BORDER))
+        p1.getAxis('right').setTextPen(pg.mkPen(COL_INFO_TXT))
+        # Keep the overlaid current viewbox glued to the main plot on resize.
+        p1.vb.sigResized.connect(
+            lambda: self._vb_i.setGeometry(p1.vb.sceneBoundingRect()))
         self.plot_widget.setMinimumHeight(100)
-        self.curve_v = self.plot_widget.plot(
-            pen=pg.mkPen(COL_ACCENT, width=2.6), name="Voltage (V)")
-        self.curve_i = self.plot_widget.plot(
-            pen=pg.mkPen(COL_INFO, width=2.0, style=Qt.DashLine), name="Current (A)")
+
+        self.curve_v = p1.plot(pen=pg.mkPen(COL_ACCENT, width=2.6))
+        self.curve_i = pg.PlotCurveItem(
+            pen=pg.mkPen(COL_INFO, width=2.0, style=Qt.DashLine))
+        self._vb_i.addItem(self.curve_i)
         plot_card.body.addWidget(self.plot_widget)
         col.addWidget(plot_card, stretch=2)
 
@@ -1275,6 +1297,11 @@ class RecellDashboard(QMainWindow):
         self.btn_passport.setEnabled(bool(pdf_path))
         for g in ("A", "B", "R"):
             getattr(self, f"btn_override_{g}").setEnabled(True)
+        # The gradeable result is done; the cycle thread is now just running the
+        # mechanical sort/eject. Free the START button now so the operator isn't
+        # locked out for the routing window (the old "must E-stop to restart" bug).
+        self.cycle_in_progress = False
+        self.btn_start.setEnabled(True)
 
     def _exec_dialog_on_top(self, dlg):
         """Tampilkan dialog modal DI ATAS window utama yang fullscreen.
@@ -1367,16 +1394,27 @@ class RecellDashboard(QMainWindow):
         if self.cycle_in_progress:
             self.log_msg("[!] Cycle already in progress.")
             return
-        # Cegah dua thread siklus jalan bersamaan kalau thread lama (mis. setelah
-        # Emergency Stop) belum selesai unwinding — keduanya akan rebutan serial.
-        if getattr(self, "_cycle_thread", None) and self._cycle_thread.is_alive():
-            self.log_msg("[!] Siklus sebelumnya masih berhenti — tunggu sebentar lalu START lagi.")
-            return
+        # Thread siklus lama mungkin masih menjalankan routing/sort baterai
+        # sebelumnya (atau sedang unwinding setelah Emergency Stop). Preempt:
+        # abort + tunggu selesai supaya tak ada dua siklus rebutan serial. Ini
+        # melipat langkah "ES dulu baru START" ke dalam START itu sendiri.
+        old = getattr(self, "_cycle_thread", None)
+        if old and old.is_alive():
+            self.master.abort_cycle = True
+            self.master.send_command("STOP_CONVEYOR")
+            self.master.wait_flag = False
+            old.join(timeout=3.0)
+            if old.is_alive():
+                self.log_msg("[!] Siklus sebelumnya belum berhenti — coba lagi sebentar.")
+                return
         # Interlock: jangan mulai siklus kalau STM32 offline/simulasi — perintah
         # akan tertelan & konveyor tak terkendali. "stale" (heartbeat sempat
         # hilang) tetap diizinkan: perintah START akan menyegarkan status, dan
         # timeout siklus menangani bila board memang hang.
-        if self.master.status.get("serial") in ("offline", "sim"):
+        # "offline" = serial nyata putus → perintah tertelan, bahaya. Tolak.
+        # "sim" = sengaja jalan --sim (tak ada hardware) → perintah disimulasikan,
+        # aman dijalankan untuk demo/uji.
+        if self.master.status.get("serial") == "offline":
             self.log_msg("[!] START ditolak: STM32 tidak online (cek koneksi serial).")
             return
         self.cycle_in_progress = True
@@ -1399,20 +1437,34 @@ class RecellDashboard(QMainWindow):
                                   bg="#FFFBEB", border="#FDE68A")
 
         self.update_progress(5, "Starting cycle…")
-        self._cycle_thread = threading.Thread(target=self._run_cycle_wrapper, daemon=True)
+        self._cycle_gen += 1
+        gen = self._cycle_gen
+        self._cycle_thread = threading.Thread(
+            target=self._run_cycle_wrapper, args=(gen,), daemon=True)
         self._cycle_thread.start()
 
-    def _run_cycle_wrapper(self):
+    def _run_cycle_wrapper(self, gen):
         try:
             self.master.run_automated_cycle()
             self._session_count += 1
-            QTimer.singleShot(0, lambda: self.counter_lbl.setText(str(self._session_count)))
         finally:
-            self.cycle_in_progress = False
             # Jangan klaim "complete" kalau siklus di-abort (Emergency Stop).
             if not self.master.abort_cycle:
                 self.bridge.progress_signal.emit(100, "Cycle complete")
-            QTimer.singleShot(0, lambda: self.btn_start.setEnabled(True))
+            # Hand back to the UI thread via a SIGNAL — QTimer.singleShot from a
+            # worker thread (no Qt event loop here) never fires, which is exactly
+            # what left START stuck disabled after one cycle.
+            self.bridge.cycle_done_signal.emit(gen)
+
+    def _cycle_thread_finished(self, gen):
+        # Runs on the UI thread after the cycle thread exits.
+        self.counter_lbl.setText(str(self._session_count))
+        # Ignore the rest if a newer cycle has since started (preempt race) —
+        # that cycle owns the button/state now.
+        if gen != self._cycle_gen:
+            return
+        self.cycle_in_progress = False
+        self.btn_start.setEnabled(True)
 
     def trigger_stop(self):
         if self.master is None:

@@ -1,0 +1,18 @@
+# RECELL-AI / Carollus — dependencies
+#
+# Minimal (cukup untuk DEPLOY ringan via ONNX): onnxruntime, opencv, numpy
+# Lengkap (untuk konversi .pt -> .onnx & evaluasi penuh): tambahkan ultralytics
+#
+# Install semua:  pip install -r requirements.txt
+
+# --- Deploy ringan (wajib) ---
+onnxruntime>=1.16          # ganti ke onnxruntime-gpu bila punya CUDA
+opencv-python>=4.8
+numpy>=1.24
+
+# --- Visual / evaluasi ---
+matplotlib>=3.7
+pandas>=2.0                # hanya untuk kurva training (training_curves)
+
+# --- Konversi & inferensi PyTorch (berat, opsional) ---
+ultralytics>=8.1           # YOLOv8: butuh untuk export_onnx.py & deploy_pt.py

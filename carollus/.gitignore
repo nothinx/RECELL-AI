@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+# artefak hasil generate (boleh dibuat ulang via scripts):
+models/*.onnx
+results/confusion_matrix*.png
+results/per_class_metrics.*
+results/dataset_distribution.png
+results/sample_predictions.png
+results/training_curves.png

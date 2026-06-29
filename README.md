@@ -31,6 +31,7 @@
 | Modul | Deskripsi | Status |
 | :--- | :--- | :--- |
 | [**🧠 `jetson/`**](./jetson) | Otak AI multimodal (YOLOv8n + XGBoost), dashboard PyQt5, orkestrasi cycle | `Software siap` |
+| [**👁️ `carollus/`**](./carollus) | Modul Computer Vision self-contained: classifier YOLOv8n-cls 4 kelas (KARAT/KOSONG/SEHAT/SOBEK) + skrip evaluasi/deploy | `Aktif` |
 | [**🦾 `firmware/`**](./firmware) | Firmware STM32F411: ADC 12-bit, kontrol stepper & konveyor, payload JSON | `Siap di-flash` |
 | [**🔬 `research/`**](./research) | Whitepaper, arsitektur AI, plot matplotlib untuk publikasi | `Aktif` |
 | [**📖 `docs/`**](./docs) | Panduan deploy, cheatsheet rumus SoH, gambar dashboard | `Aktif` |

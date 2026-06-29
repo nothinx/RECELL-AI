@@ -42,9 +42,10 @@
 
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  YOLOv8n  (Vision)│     │  XGBoost  (SOH)  │     │  STM32  (Sensor) │
-│  best.pt          │     │  soh_xgb.json    │     │  INA226+MLX90614 │
-│  KARAT/SEHAT/SOBEK│     │  v_drop, Rint, ΔT│     │  JSON @115200 8N1│
+│ YOLOv8n-cls (Vis)│     │  XGBoost  (SOH)  │     │  STM32  (Sensor) │
+│  best_cls.pt     │     │  soh_xgb.json    │     │  INA226+MLX90614 │
+│ KOSONG / KARAT / │     │  v_drop, Rint, ΔT│     │  JSON @115200 8N1│
+│ SEHAT / SOBEK    │     │                  │     │                  │
 └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
          │                        │                        │
          ▼                        ▼                        ▼
@@ -81,9 +82,12 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ### 2. Pastikan model siap
 ```text
 jetson/models/weights/
-├── best.pt              # YOLOv8n (KARAT / SEHAT / SOBEK)
+├── best_cls.pt          # YOLOv8n-cls (KOSONG / KARAT / SEHAT / SOBEK) — dipakai utama
+├── best.pt              # YOLOv8n detect (fallback bila best_cls.pt tidak ada)
 └── soh_xgb_model.json   # XGBoost SoH regressor (NASA-trained)
 ```
+
+> `main.py` memilih model **classification** (`best_cls.*`) lebih dulu; deteksi objek (`best.*`) hanya fallback bila classifier tidak ada.
 
 ### 3. Jalankan dashboard
 ```bash
@@ -102,23 +106,24 @@ python3 ui_dashboard.py
 ### 4. (Jetson saja) Kompilasi YOLO ke TensorRT
 ```bash
 # Di Jetson Orin Nano — 2× lebih cepat dengan FP16
-yolo export model=jetson/models/weights/best.pt format=engine half=True workspace=4
-# main.py akan otomatis prefer best.engine di atas best.pt
+yolo export model=jetson/models/weights/best_cls.pt format=engine half=True imgsz=224
+# main.py akan otomatis prefer best_cls.engine di atas best_cls.pt
 ```
 
 ---
 
 ## 🔬 AI Vision Classes
 
-Model `best.pt` dilatih untuk 3 kelas:
+Model **classifier** `best_cls.pt` (YOLOv8n-cls, 224×224) mengambil **Top-1** dari 4 kelas:
 
-| Label | Arti | Efek pada Vision Score | Catatan |
+| Label | Arti | Vision Score | Catatan |
 | :---: | :--- | :--- | :--- |
-| **`KARAT`** | Korosi/karat di kutub | `-0.4` | False positive di-filter oleh threshold persistence (≥ 3 frame) |
-| **`SOBEK`** | Wrapper plastik sobek | **`critical → 0`** | Otomatis Grade R, isolasi listrik hilang |
-| **`SEHAT`** | Baterai bersih | `0` (informational) | Tidak menambah/mengurangi skor |
+| **`KOSONG`** | Slot kosong / tak ada baterai | — (*gate*) | Frame diabaikan, bukan sinyal grading |
+| **`SEHAT`** | Baterai bersih | `1.0` | Kandidat Grade A |
+| **`KARAT`** | Korosi/karat di kutub | `0.5` | Dihitung setelah lolos persistence (≥ 3 frame) |
+| **`SOBEK`** | Wrapper plastik sobek | `0.0` | Defect berat → cenderung Grade R |
 
-> **Penting** — Vision Score = `1.00` bukan berarti AI bekerja sempurna; bisa juga berarti **tidak ada deteksi sama sekali** (kamera kosong / objek bukan baterai). Cek bounding box muncul di feed untuk konfirmasi.
+> **Catatan** — Ini **klasifikasi citra**, bukan deteksi objek, jadi **tidak ada bounding box** di feed; model hanya menjawab kondisi dominan (Top-1) per frame. Defect (`KARAT`/`SOBEK`) baru dihitung setelah persisten ≥ 3 frame untuk menyaring false positive. Modul vision mandiri ada di [`carollus/`](./carollus).
 
 ---
 
@@ -280,7 +285,7 @@ Firmware memancarkan `{"status": "<NAMA>", ...field}\n`.
 | Komponen | Bisa diuji tanpa hardware? | Status |
 | :--- | :---: | :--- |
 | Dashboard GUI (semua state) | ✅ | Terverifikasi via smoke-test 3-stage |
-| YOLO load + inferensi webcam | ✅ | Terverifikasi (3 kelas, KARAT/SEHAT/SOBEK) |
+| YOLO load + inferensi webcam | ✅ | Terverifikasi (classify 4 kelas: KOSONG/KARAT/SEHAT/SOBEK) |
 | XGBoost SoH prediksi | ⚠️ | Load OK, akurasi perlu validasi pada baterai nyata |
 | Battery Passport PDF | ✅ | PDF tergenerasi end-to-end |
 | Tanda tangan & verifikasi QR passport | ✅ | Sign/verify HMAC-SHA256 ter-cover unit test (`tests/test_passport_auth.py`) |
